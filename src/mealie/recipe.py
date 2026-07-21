@@ -159,6 +159,26 @@ class RecipeMixin:
         logger.info({"message": "Patching recipe", "slug": slug})
         return self._handle_request("PATCH", f"/api/recipes/{slug}", json=recipe_data)
 
+    def has_image(self, recipe_id: str) -> bool:
+        """Return True if the recipe has a real image FILE, not just the image field.
+
+        Mealie sets the recipe.image field to a cache-key string even when no
+        image was ever stored, so that field cannot be trusted. This checks the
+        actual media file.
+        """
+        if not recipe_id:
+            return False
+        for variant in ("original.webp", "min-original.webp"):
+            try:
+                resp = self._client.get(
+                    f"/api/media/recipes/{recipe_id}/images/{variant}"
+                )
+                if resp.status_code == 200 and len(resp.content) > 100:
+                    return True
+            except Exception:
+                pass
+        return False
+
     def update_recipe_image_bytes(
         self, slug: str, image_bytes: bytes, extension: str = "png"
     ):

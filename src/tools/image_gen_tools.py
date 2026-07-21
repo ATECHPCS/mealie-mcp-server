@@ -7,11 +7,13 @@ logger = logging.getLogger("mealie-mcp")
 
 def register_image_gen_tools(mcp, mealie):
     @mcp.tool()
-    def generate_recipe_image(slug: str, details: str = "") -> dict:
+    def generate_recipe_image(slug: str, details: str = "", force: bool = False) -> dict:
         """Generate a food photo with OpenAI gpt-image and set it as the recipe image.
 
-        Use this when a recipe has no image. It creates a realistic, appetizing
-        photograph of the finished dish and uploads it to the recipe in Mealie.
+        Safe to call after every import: it checks whether a REAL image file
+        already exists and only generates when one is missing (the recipe.image
+        field is unreliable, so do not gate on it yourself). Creates a realistic,
+        appetizing photograph of the finished dish and uploads it to Mealie.
 
         Args:
             slug: The recipe slug to add an image to.
@@ -25,6 +27,13 @@ def register_image_gen_tools(mcp, mealie):
             recipe = mealie.get_recipe(slug)
         except Exception as e:
             return {"error": f"Could not load recipe '{slug}': {e}"}
+        recipe_id = recipe.get("id") if isinstance(recipe, dict) else None
+        if not force and recipe_id and mealie.has_image(recipe_id):
+            return {
+                "skipped": True,
+                "slug": slug,
+                "message": "Recipe already has a real image, not regenerating (pass force=true to override).",
+            }
         name = (recipe.get("name") or slug) if isinstance(recipe, dict) else slug
         desc = details or (recipe.get("description") if isinstance(recipe, dict) else "") or ""
         prompt = (

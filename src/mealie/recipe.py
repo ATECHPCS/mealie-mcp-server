@@ -159,6 +159,26 @@ class RecipeMixin:
         logger.info({"message": "Patching recipe", "slug": slug})
         return self._handle_request("PATCH", f"/api/recipes/{slug}", json=recipe_data)
 
+    def update_recipe_image_bytes(
+        self, slug: str, image_bytes: bytes, extension: str = "png"
+    ):
+        """Upload raw image bytes as a recipe's image (multipart form upload).
+
+        Args:
+            slug: Recipe slug.
+            image_bytes: Raw image file bytes.
+            extension: File extension without a dot (png, jpg, webp).
+        """
+        if not slug:
+            raise ValueError("Recipe slug cannot be empty")
+        if not image_bytes:
+            raise ValueError("Image bytes cannot be empty")
+        files = {"image": (f"image.{extension}", image_bytes, f"image/{extension}")}
+        data = {"extension": extension}
+        return self._handle_request(
+            "PUT", f"/api/recipes/{slug}/image", files=files, data=data
+        )
+
     def set_recipe_categories(self, slug: str, category_ids: List[str]) -> Dict[str, Any]:
         """Set the categories for a recipe, replacing any existing categories.
 

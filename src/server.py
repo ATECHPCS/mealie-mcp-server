@@ -53,10 +53,18 @@ def main():
             from starlette.responses import JSONResponse
             from starlette.routing import Route
 
+            from mcp.server.transport_security import TransportSecuritySettings
+
             host = os.getenv("HOST", "0.0.0.0")
             port = int(os.getenv("PORT", "3032"))
             mcp.settings.host = host
             mcp.settings.port = port
+            # This bridge is reached by name/IP over the LAN and is guarded by
+            # the API-key auth below, so the SDK's default localhost-only DNS
+            # rebinding host check (which 421s LAN requests) is turned off.
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            )
 
             app = mcp.streamable_http_app()
 

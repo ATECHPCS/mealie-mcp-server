@@ -51,3 +51,46 @@ def register_image_gen_tools(mcp, mealie):
             return {"error": f"Image generated but upload to Mealie failed: {e}"}
         logger.info({"message": "Generated and set recipe image", "slug": slug, "model": model})
         return {"ok": True, "slug": slug, "message": f"Generated and set an image for '{name}'."}
+
+
+    @mcp.tool()
+    def set_recipe_nutrition(
+        slug: str,
+        servings: int,
+        calories: float,
+        protein_g: float,
+        carbs_g: float,
+        fat_g: float,
+    ) -> dict:
+        """Set a recipe's servings and per-serving nutrition (macros).
+
+        Values are PER SINGLE SERVING. Mealie stores nutrition as bare number
+        strings with no units, so "42" not "42 g". Use this after import to add
+        the calories/protein/carbs/fat that meal planning relies on.
+
+        Args:
+            slug: Recipe slug.
+            servings: Number of servings the recipe makes (must be a real number).
+            calories: Calories per serving.
+            protein_g: Protein grams per serving.
+            carbs_g: Carbohydrate grams per serving.
+            fat_g: Fat grams per serving.
+        """
+        def _num(x):
+            x = float(x)
+            return str(int(x)) if x.is_integer() else str(round(x, 1))
+
+        payload = {
+            "recipeServings": servings,
+            "nutrition": {
+                "calories": _num(calories),
+                "proteinContent": _num(protein_g),
+                "carbohydrateContent": _num(carbs_g),
+                "fatContent": _num(fat_g),
+            },
+        }
+        try:
+            mealie.patch_recipe(slug, payload)
+        except Exception as e:
+            return {"error": f"Failed to set nutrition for '{slug}': {e}"}
+        return {"ok": True, "slug": slug, "servings": servings}

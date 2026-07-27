@@ -1,0 +1,24 @@
+# Project name pinned: named volumes are prefixed with it, so letting
+# it default to the clone directory could orphan live data.
+name: mealie-mcp-rldiao
+
+services:
+  mealie-mcp-rldiao:
+    build:
+      context: https://github.com/ATECHPCS/mealie-mcp-server.git#feat/http-transport-and-auto-image
+      dockerfile: Dockerfile
+    container_name: mealie-mcp-rldiao
+    pull_policy: build
+    restart: unless-stopped
+    ports:
+      - "3032:3032"
+    environment:
+      MCP_TRANSPORT: http
+      HOST: 0.0.0.0
+      PORT: "3032"
+      MEALIE_BASE_URL: http://10.10.0.156:9000
+      MEALIE_API_KEY: ${MEALIE_MCP_BEARER}
+      OPENAI_API_KEY: ${MEALIE_OPENAI_API_KEY}
+      OPENAI_IMAGE_MODEL: gpt-image-1
+      MCP_AUTH: api_key
+      MCP_API_KEYS: ${MEALIE_MCP2_INBOUND_KEY}

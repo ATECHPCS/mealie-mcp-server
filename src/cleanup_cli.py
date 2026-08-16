@@ -130,10 +130,13 @@ def main() -> None:
     args = ap.parse_args()
 
     m = _connect()
-    if args.dupes:
-        _run_dupes(m, args.cutoff)
-        return
-    _run_cleanup(m, args)
+    try:
+        if args.dupes:
+            _run_dupes(m, args.cutoff)
+        else:
+            _run_cleanup(m, args)
+    finally:
+        m.close()
 
 
 if __name__ == "__main__":

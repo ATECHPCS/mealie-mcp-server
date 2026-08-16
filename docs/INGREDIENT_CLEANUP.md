@@ -73,23 +73,39 @@ were fixed automatically.
 ## Food dedupe
 
 Imported recipes mint a food per unrecognised name, breeding near-duplicates.
-`food_dedupe.find_duplicate` resolves a new name to an existing catalog food by,
-in order: a curated `MERGE_OVERRIDES` map → exact normalised match → fuzzy match
-at/above `AUTO_CUTOFF` (0.9). A curated `KEEP_DISTINCT` list protects
-real-but-similar foods whose difference matters to a shopping list or macro
-count — bell-pepper colours, ground-beef fat ratios, lemon vs lime,
-chicken breast vs thighs.
 
+The **auto-apply path never fuzzy-merges** — fuzzy similarity is too dangerous
+to apply unattended ("salted butter" vs "unsalted butter" score 0.93, "cooked"
+vs "uncooked rice" 0.92). `food_dedupe.resolve_existing` reuses a food only on
+an exact normalised-name match or a hand-reviewed `MERGE_OVERRIDES` entry;
+anything else is created fresh.
+
+Fuzzy matching lives entirely in the **review** path:
 `suggest_duplicate_clusters` (behind the `find_duplicate_foods` tool and
-`--dupes`) is a looser, read-only pass for eyeballing borderline pairs before
-merging them with Mealie's native `/api/foods/merge`.
+`--dupes`) surfaces borderline pairs for a human to eyeball before merging them
+with Mealie's native `/api/foods/merge`. A curated `KEEP_DISTINCT` list
+suppresses real-but-similar foods whose difference matters to a shopping list or
+macro count — bell-pepper colours, ground-beef fat ratios, lemon vs lime,
+chicken breast vs thighs.
 
 ## Safety
 
 - **Dry-run by default** everywhere — MCP tools and CLI both preview unless told
   to apply.
-- **Auto changes are conservative**; ambiguous ones are held.
-- Foods are **deduped before creation**, and lines whose parsed food name
-  contains "recipe" are never written back as a food.
-- Applying a plan only ever **PATCHes `recipeIngredient`**; nothing else on the
-  recipe is touched, and structured lines (already linked to a food) are ignored.
+- **Schema-valid writes**: entries are built for Mealie's `RecipeIngredient`
+  input model — `disableAmount=false` (so parsed amounts stay visible),
+  `display=""`, `isFood=true`, and `referenceId` omitted (never sent as `null`)
+  on inserted rows.
+- **Positional-correlation guard**: the NLP parser must return exactly one
+  result per input; a short or mis-echoed response blocks auto-apply for the
+  affected lines rather than risk assigning a food to the wrong ingredient.
+- **Non-destructive extraction**: a parenthetical that carries a quantity *and*
+  a non-measure word ("12 oz frozen peas") is held for review, never stripped —
+  the real food may be inside it.
+- **No fuzzy auto-merge** (above), and lines whose parsed food name contains
+  "recipe" are never written back as a food.
+- **Instruction links preserved**: a compound/distributive line that a recipe
+  step references is held rather than expanded, so the step's link is not
+  orphaned.
+- Applying a plan only ever **PATCHes `recipeIngredient`**; structured lines
+  (already linked to a food) are ignored.

@@ -84,14 +84,37 @@ _TRAILING_NOTE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A parenthetical that is a weight/volume/temperature conversion or a per-batch
-# annotation — pure noise for food identification, dropped outright.
+# A parenthetical that is *purely* a weight/volume/temperature conversion or a
+# per-batch annotation — noise for food identification, safe to drop. This must
+# match the ENTIRE parenthetical: a trailing food word ("12 oz frozen peas")
+# means the food is inside the parentheses and the group must NOT be dropped.
+_UNIT_TOKEN = (
+    r"(?:g|kg|mg|ml|l|oz|fl\s?oz|lb|lbs?|gram|grams|kilograms?|ounces?|"
+    r"pounds?|cups?|tbsp|tsp|°[cf]?)"
+)
+_MEASURE = r"[\d.,/\s]+\s*" + _UNIT_TOKEN
+
+# Bare-word unit + measurement-qualifier vocabulary. If, after removing these,
+# a parenthetical with a number still has alpha words left, the real food is
+# probably inside it (e.g. "12 oz frozen peas" -> "frozen peas" remains).
+_UNIT_WORDS = {
+    "g", "kg", "mg", "ml", "l", "oz", "fl", "lb", "lbs", "gram", "grams",
+    "kilogram", "kilograms", "ounce", "ounces", "pound", "pounds", "cup",
+    "cups", "tbsp", "tsp", "tablespoon", "tablespoons", "teaspoon", "teaspoons",
+}
+_MEASURE_QUALIFIERS = {
+    "about", "approx", "approximately", "roughly", "around", "each", "total",
+    "per", "batch", "batches", "jar", "jars", "loaf", "loaves", "flesh",
+    "drained", "packed", "sifted", "cooked", "raw", "uncooked", "diced",
+    "chopped", "minced", "melted", "softened", "plus", "more", "or", "and",
+    "the", "of", "a", "to", "weight", "net", "dry", "before", "after",
+}
 _AMOUNT_PAREN_RE = re.compile(
     r"^\s*(?:about\s+|approx\.?\s+)?"
-    r"(?:[\d.,/\s]+\s*"
-    r"(?:g|kg|mg|ml|l|oz|fl\s?oz|lb|lbs|gram|grams|kilograms?|ounces?|"
-    r"pounds?|ml|cups?|tbsp|tsp|°[cf]?|per\b).*"
-    r"|[\d.,/\s]+)\s*$",
+    + _MEASURE
+    + r"(?:\s*[/,]\s*" + _MEASURE + r")*"  # "/ 320 g", ", 479 g"
+    + r"(?:\s+per\s+[\w\s]+?)?"  # "per batch", "per jar"
+    + r"\s*$",
     re.IGNORECASE,
 )
 
@@ -141,6 +164,17 @@ def _has_digit(text: str) -> bool:
     return any(ch.isdigit() for ch in text)
 
 
+def _paren_hides_food(inner: str) -> bool:
+    """True if a parenthetical carries a quantity AND a non-measure word — a
+    sign the real food is inside it ("12 oz frozen peas"), as opposed to a pure
+    qualifier ("about 150 g flesh")."""
+    if not _has_digit(inner):
+        return False
+    words = re.findall(r"[a-z]+", inner.lower())
+    leftover = [w for w in words if w not in _UNIT_WORDS and w not in _MEASURE_QUALIFIERS]
+    return bool(leftover)
+
+
 def is_section_header(raw: str) -> bool:
     """A section label stored as an ingredient, e.g. "For the sauce:" or
     "For the pineapple chimichurri". No quantity, no real food."""
@@ -156,29 +190,42 @@ def is_section_header(raw: str) -> bool:
 def is_recipe_reference(raw: str, known_titles: Optional[set] = None) -> bool:
     """A line that points at another recipe rather than naming a food, e.g.
     "12 slices Keto Brioche Bread Recipe (...)". These must never be written
-    back as a food — linking a sub-recipe is a UI action."""
+    back as a food — linking a sub-recipe is a UI action.
+
+    Detection needs explicit evidence and is deliberately narrow to avoid
+    misclassifying ordinary foods:
+      * the word "recipe" appears, or
+      * the line has NO quantity and its whole text exactly equals a known
+        recipe title. A line *with* a quantity ("2 cups tomato sauce") is an
+        ingredient measurement, not a sub-recipe link, even if a "Tomato Sauce"
+        recipe happens to exist.
+    """
     if re.search(r"\brecipes?\b", raw, re.IGNORECASE):
         return True
-    if known_titles:
-        low = raw.lower()
-        for title in known_titles:
-            if title and len(title) > 6 and title.lower() in low:
-                return True
+    if known_titles and not _has_digit(raw):
+        core = raw.strip().rstrip(",.").lower()
+        titles = {t.strip().lower() for t in known_titles if t and len(t) > 6}
+        if core in titles:
+            return True
     return False
 
 
-def _extract_parentheticals(text: str) -> tuple[str, List[str], bool]:
+def _extract_parentheticals(text: str) -> tuple[str, List[str], bool, bool]:
     """Pull every "(...)" group out of `text`.
 
-    Returns (stripped_text, note_fragments, saw_alternative). Amount/conversion
-    parentheticals are dropped; "(or olive oil)" becomes an alternative note
-    fragment; anything else is preserved as a note fragment.
+    Returns (stripped_text, note_fragments, saw_alternative, suspicious).
+    Pure amount/conversion parentheticals are dropped; "(or olive oil)" becomes
+    an alternative note fragment; anything else is preserved as a note fragment.
+    `suspicious` is True when a group carries a quantity but is *not* a pure
+    measure (e.g. "12 oz frozen peas") — a sign the real food is inside the
+    parentheses, so the line must not be auto-applied.
     """
     notes: List[str] = []
     saw_alt = False
+    suspicious = False
 
     def _repl(match: re.Match) -> str:
-        nonlocal saw_alt
+        nonlocal saw_alt, suspicious
         inner = match.group(1).strip()
         low = inner.lower()
         if low.startswith("or ") or low == "or":
@@ -187,18 +234,31 @@ def _extract_parentheticals(text: str) -> tuple[str, List[str], bool]:
         elif _AMOUNT_PAREN_RE.match(inner):
             pass  # pure conversion/measure noise — drop it
         elif inner:
+            if _paren_hides_food(inner):
+                suspicious = True
             notes.append(inner)
         return " "
 
     stripped = re.sub(r"\(([^)]*)\)", _repl, text)
-    return _norm_ws(stripped), notes, saw_alt
+    return _norm_ws(stripped), notes, saw_alt, suspicious
 
 
 def _split_items(items_text: str) -> List[str]:
-    """Split "salt, pepper, Italian seasoning, and onion powder" into parts."""
-    # normalise the Oxford "and"/"& " joiners into commas, then split
-    joined = re.sub(r",?\s+(?:and|&)\s+", ",", items_text, flags=re.IGNORECASE)
-    return [p.strip() for p in joined.split(",") if p.strip()]
+    """Split a distributive item list into its foods.
+
+    "salt, pepper, Italian seasoning, and onion powder" -> 4 items. Only a
+    *leading* "and"/"& " on the final comma-separated item is treated as a list
+    joiner, so an internal conjunction in a compound food name survives:
+    "salt, macaroni and cheese, pepper" -> ["salt", "macaroni and cheese",
+    "pepper"]. A comma-free "A and B" is split on its single conjunction.
+    """
+    parts = [p.strip() for p in items_text.split(",") if p.strip()]
+    if len(parts) > 1:
+        parts[-1] = re.sub(r"^(?:and|&)\s+", "", parts[-1], flags=re.IGNORECASE)
+        return [p for p in parts if p]
+    # no commas: a single "A and B" list
+    halves = re.split(r"\s+(?:and|&)\s+", items_text, maxsplit=1, flags=re.IGNORECASE)
+    return [h.strip() for h in halves if h.strip()]
 
 
 def _try_distributive(text: str, base_note: str) -> Optional[List[Candidate]]:
@@ -282,7 +342,7 @@ def clean_line(raw: str, known_titles: Optional[set] = None) -> CleanedLine:
         )
 
     # Strip parenthetical conversions / lift "(or ...)" alternatives out.
-    stripped, paren_notes, saw_alt_paren = _extract_parentheticals(work)
+    stripped, paren_notes, saw_alt_paren, suspicious_paren = _extract_parentheticals(work)
     stripped = _TEMP_TAIL_RE.sub("", stripped)
     stripped = _norm_ws(stripped)
 
@@ -294,12 +354,15 @@ def clean_line(raw: str, known_titles: Optional[set] = None) -> CleanedLine:
         stripped = _norm_ws(stripped[: tm.start()])
 
     base_note = _join_notes(*paren_notes, trailing)
+    # A food-bearing parenthetical ("12 oz frozen peas") means the stripped text
+    # is not trustworthy — never auto-apply such a line.
+    auto = not suspicious_paren
 
     # 1) distributive "N unit each A, B, C"
     dist = _try_distributive(stripped, base_note)
     if dist:
         return CleanedLine(
-            raw, DISTRIBUTIVE, ACTION_PARSE, True, dist,
+            raw, DISTRIBUTIVE, ACTION_PARSE, auto, dist,
             "one amount distributed over several foods — split per food",
         )
 
@@ -307,7 +370,7 @@ def clean_line(raw: str, known_titles: Optional[set] = None) -> CleanedLine:
     comp = _try_compound_seasoning(stripped, base_note)
     if comp:
         return CleanedLine(
-            raw, COMPOUND, ACTION_PARSE, True, comp,
+            raw, COMPOUND, ACTION_PARSE, auto, comp,
             "seasoning compound — split into separate foods",
         )
 
@@ -323,9 +386,10 @@ def clean_line(raw: str, known_titles: Optional[set] = None) -> CleanedLine:
 
     # 4) parenthetical-only cleanup (incl. a lifted "(or Y)" alternative)
     if paren_notes or saw_alt_paren or (tm is not None):
-        auto = True
         reason = "stripped parenthetical/measure noise"
-        if saw_alt_paren:
+        if suspicious_paren:
+            reason = "parenthetical carries a quantity + words — food may be inside (review)"
+        elif saw_alt_paren:
             reason = "parenthetical alternative lifted to note — first food kept"
         return CleanedLine(
             raw, PARENTHETICAL, ACTION_PARSE, auto,
@@ -334,7 +398,7 @@ def clean_line(raw: str, known_titles: Optional[set] = None) -> CleanedLine:
 
     # 5) ordinary line — hand straight to the parser
     return CleanedLine(
-        raw, NORMAL, ACTION_PARSE, True,
+        raw, NORMAL, ACTION_PARSE, auto,
         [Candidate(text=stripped or raw, note_extra=base_note)],
         "ordinary line",
     )

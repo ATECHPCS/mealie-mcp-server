@@ -131,16 +131,29 @@ class FoodsMixin:
         Returns:
             List[Dict[str, Any]]: All food objects (id + name at minimum).
         """
+        page_size = max(1, min(int(page_size or 100), 1000))
         items: List[Dict[str, Any]] = []
+        seen_ids: set = set()
         page = 1
-        while True:
+        max_pages = 10000  # backstop against a proxy that ignores pagination
+        while page <= max_pages:
             resp = self._handle_request(
                 "GET", "/api/foods", params={"page": page, "perPage": page_size}
             )
             batch = (resp or {}).get("items", []) if isinstance(resp, dict) else []
-            items.extend(batch)
+            if not batch:
+                break
+            # guard against a server/proxy that repeats a page: stop if this
+            # batch adds nothing new.
+            new = [it for it in batch if it.get("id") not in seen_ids]
+            for it in new:
+                seen_ids.add(it.get("id"))
+            items.extend(new)
+            if not new:
+                break
             total = (resp or {}).get("total") if isinstance(resp, dict) else None
-            if not batch or (total is not None and len(items) >= total):
+            # a short page is the last page; a known total we've reached ends it
+            if len(batch) < page_size or (total and len(items) >= total):
                 break
             page += 1
         logger.info({"message": "Fetched full food catalog", "count": len(items)})

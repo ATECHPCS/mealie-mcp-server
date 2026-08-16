@@ -59,10 +59,8 @@ def test_recipe_reference_held():
     assert cl.candidates == []
 
 
-def test_recipe_reference_by_known_title():
-    cl = clean_line(
-        "2 cups leftover marinara base", known_titles={"leftover marinara base"}
-    )
+def test_recipe_reference_keyword_wins_over_quantity():
+    cl = clean_line("12 slices Keto Brioche Bread Recipe", known_titles=set())
     assert cl.category == RECIPE_REFERENCE
 
 
@@ -183,3 +181,39 @@ def test_ordinary_line_passes_through():
 def test_empty_line():
     cl = clean_line("   ")
     assert cl.candidates == []
+
+
+# --- codex-review regressions -------------------------------------------------
+
+
+def test_food_bearing_parenthetical_is_held():
+    # the real food is inside the parens — must NOT be auto-stripped to "1 bag"
+    cl = clean_line("1 bag (12 oz frozen peas)")
+    assert cl.auto_safe is False
+    cl2 = clean_line("1 package (8 oz cream cheese), softened")
+    assert cl2.auto_safe is False
+
+
+def test_pure_qualifier_parenthetical_stays_auto():
+    cl = clean_line("1 ripe avocado, diced (about 150 g flesh)")
+    assert cl.auto_safe is True
+    assert _texts(cl) == ["1 ripe avocado, diced"]
+
+
+def test_distributive_preserves_internal_compound():
+    cl = clean_line("1 tsp each salt, macaroni and cheese, pepper")
+    assert _texts(cl) == ["1 tsp salt", "1 tsp macaroni and cheese", "1 tsp pepper"]
+
+
+def test_measured_ingredient_not_flagged_as_recipe_by_title():
+    # a common ingredient with a quantity must not be mistaken for a sub-recipe
+    # reference just because a recipe with that name exists
+    cl = clean_line("2 cups tomato sauce", known_titles={"Tomato Sauce"})
+    assert cl.category != RECIPE_REFERENCE
+    assert cl.candidates  # it gets parsed as a food
+
+
+def test_bare_recipe_name_line_is_a_reference():
+    # a quantity-free line that is exactly a recipe title IS a sub-recipe link
+    cl = clean_line("Chimichurri Sauce", known_titles={"Chimichurri Sauce"})
+    assert cl.category == RECIPE_REFERENCE

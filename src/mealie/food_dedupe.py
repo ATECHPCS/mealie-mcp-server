@@ -64,15 +64,23 @@ _KEEP_DISTINCT_LOOKUP = {p for p in KEEP_DISTINCT}
 
 
 def _singularise(word: str) -> str:
-    """Conservative, predictable de-pluralisation of one word."""
+    """Conservative, predictable de-pluralisation of one word.
+
+    Deliberately narrow: it never mangles a word into a non-word. Leaves "ss",
+    "us", "is" and "-ies" words untouched (so no "hummus"->"hummu",
+    "cookies"->"cooky"); a missed singular/plural fold is harmless (it just
+    shows up as a review suggestion) whereas a mangled key breaks exact matches.
+    """
     if len(word) <= 3:
         return word
-    if word.endswith("ies"):
-        return word[:-3] + "y"  # berries -> berry
-    if word.endswith(("ches", "shes", "sses", "xes", "zes")):
-        return word[:-2]  # peaches -> peach, glasses -> glass
-    if word.endswith("s") and not word.endswith("ss"):
-        return word[:-1]  # eggs -> egg, but keep "molass"/"hummus"-ish "ss"
+    if word.endswith(("ss", "us", "is", "ies")):
+        return word  # glass, hummus, axis; leave berries/cookies alone
+    if word.endswith("oes"):
+        return word[:-2]  # tomatoes -> tomato, potatoes -> potato
+    if word.endswith(("ches", "shes", "xes", "zes")):
+        return word[:-2]  # peaches -> peach, dishes -> dish, boxes -> box
+    if word.endswith("s"):
+        return word[:-1]  # eggs -> egg, flakes -> flake
     return word
 
 
@@ -85,10 +93,48 @@ def norm(name: str) -> str:
     return " ".join(_singularise(w) for w in s.split())
 
 
+# Build normalised lookups once norm() exists, so override/keep-distinct keys
+# match norm()'s output (singularisation would otherwise leave e.g. "crushed
+# red pepper flakes" unable to match the normalised "... flake").
+_MERGE_OVERRIDES_NORM: Dict[str, str] = {
+    norm(k): v for k, v in MERGE_OVERRIDES.items()
+}
+_KEEP_DISTINCT_NORM = {
+    frozenset(norm(x) for x in pair) for pair in KEEP_DISTINCT
+}
+
+
 def _is_kept_distinct(a: str, b: str) -> bool:
-    return frozenset({a, b}) in _KEEP_DISTINCT_LOOKUP or frozenset(
-        {norm(a), norm(b)}
-    ) in _KEEP_DISTINCT_LOOKUP
+    return frozenset({norm(a), norm(b)}) in _KEEP_DISTINCT_NORM
+
+
+def resolve_existing(name: str, id_by_name: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
+    """Exact/override-only resolution for the cleanup auto-path — NO fuzzy.
+
+    Fuzzy similarity is catalog-corrupting for auto-apply ("salted butter" vs
+    "unsalted butter" score 0.93), so the cleanup pipeline only reuses a food
+    when the normalised name matches exactly or via a hand-reviewed override.
+    Fuzzy matches live in `suggest_duplicate_clusters` for human review instead.
+
+    Args:
+        name: parsed food name.
+        id_by_name: normalised-name -> food id (the catalog).
+
+    Returns:
+        (canonical_name, food_id) if an existing food should be reused, else
+        (None, None). Unlike `find_duplicate`, an identical existing spelling
+        IS returned (so cleanup reuses it rather than creating a duplicate).
+    """
+    key = norm(name)
+    canonical = name
+    override = _MERGE_OVERRIDES_NORM.get(key)
+    if override is not None:
+        canonical = override
+        key = norm(override)
+    fid = id_by_name.get(key)
+    if fid is not None:
+        return canonical, fid
+    return None, None
 
 
 def find_duplicate(
@@ -109,7 +155,7 @@ def find_duplicate(
     for cn in catalog_names:
         by_key.setdefault(norm(cn), cn)
 
-    override = MERGE_OVERRIDES.get(key)
+    override = _MERGE_OVERRIDES_NORM.get(key)
     if override is not None:
         # map onto the catalog's actual casing if present
         return by_key.get(norm(override), override)

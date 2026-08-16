@@ -8,8 +8,34 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from mealie.food_dedupe import (  # noqa: E402
     find_duplicate,
     norm,
+    resolve_existing,
     suggest_duplicate_clusters,
 )
+
+
+def test_singularise_never_mangles():
+    # the old rule produced cooky/py/hummu; the new one must not
+    assert norm("hummus") == "hummus"
+    assert norm("cookies") == "cookies"
+    assert norm("pies") == "pies"
+    assert norm("tomatoes") == "tomato"
+    assert norm("eggs") == "egg"
+    assert norm("flakes") == "flake"
+
+
+def test_resolve_existing_exact_and_override_only():
+    idx = {norm("olive oil"): "oo-1", norm("water"): "w-1"}
+    # exact (identical spelling) is reused — no duplicate creation
+    assert resolve_existing("olive oil", idx) == ("olive oil", "oo-1")
+    # override folds onto canonical even when singularised
+    assert resolve_existing("crushed red pepper flakes", {norm("red pepper flakes"): "rpf-1"}) == (
+        "red pepper flakes",
+        "rpf-1",
+    )
+    # a genuinely new food resolves to nothing (created fresh downstream)
+    assert resolve_existing("dragonfruit", idx) == (None, None)
+    # fuzzy near-miss is NOT resolved (would corrupt the catalog)
+    assert resolve_existing("salted butter", {norm("unsalted butter"): "ub-1"}) == (None, None)
 
 
 def test_norm_singular_and_punctuation():

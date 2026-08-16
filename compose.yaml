@@ -5,7 +5,7 @@ name: mealie-mcp-rldiao
 services:
   mealie-mcp-rldiao:
     build:
-      context: https://github.com/ATECHPCS/mealie-mcp-server.git#feat/http-transport-and-auto-image
+      context: https://github.com/ATECHPCS/mealie-mcp-server.git#main
       dockerfile: Dockerfile
     container_name: mealie-mcp-rldiao
     pull_policy: build

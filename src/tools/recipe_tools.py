@@ -572,8 +572,21 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
             updated = mealie.update_recipe(slug, recipe.model_dump(exclude_none=True))
 
             if image_url is not None:
-                mealie.scrape_recipe_image_from_url(slug, image_url)
-                updated = mealie.get_recipe(slug)
+                # Best-effort: an unusable image URL must not fail the create.
+                # The recipe already exists; a missing image is recoverable via
+                # generate_recipe_image / the auto-image backfill loop.
+                try:
+                    mealie.scrape_recipe_image_from_url(slug, image_url)
+                    updated = mealie.get_recipe(slug)
+                except Exception as img_err:
+                    logger.warning(
+                        {
+                            "message": "Recipe created but image scrape failed",
+                            "slug": slug,
+                            "url": image_url,
+                            "error": str(img_err),
+                        }
+                    )
 
             return updated
         except Exception as e:
@@ -702,31 +715,107 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
 
     @mcp.tool()
     def set_recipe_image_from_url(slug: str, image_url: str) -> Dict[str, Any]:
-        """Set a recipe's image by scraping it from a URL.
+        """Set a recipe's image by scraping it from a URL, then verify it stuck.
+
+        Mealie's scrape endpoint frequently returns a bland "success" payload
+        even when it could NOT fetch a usable image (the URL is not a direct
+        image, is behind a CDN block, 404s, etc.), and it leaves the recipe with
+        no real image file. So this tool does not trust that response: after the
+        scrape it checks the actual media file (has_image) and returns an honest,
+        per-call-distinguishable result.
+
+        On failure it returns ok=False. Do NOT retry this tool with a different
+        URL in a loop: a False result means Mealie cannot turn that source into a
+        stored image, and hammering more URLs produces the same no-progress
+        outcome. Fall back to generate_recipe_image to create one instead.
 
         Args:
             slug: The unique text identifier for the recipe.
             image_url: URL of the image to scrape and use as the recipe image.
 
         Returns:
-            Dict[str, Any]: Confirmation that the image was set.
+            Dict[str, Any]: {ok, slug, image_url, message}. ok=True only when a
+            real image file is confirmed attached afterwards.
         """
+        logger.info(
+            {
+                "message": "Setting recipe image from URL",
+                "slug": slug,
+                "url": image_url,
+            }
+        )
+
+        # Resolve the recipe id up front so we can verify the real media file
+        # afterwards. A missing slug is a genuine caller error worth raising.
         try:
-            logger.info(
+            recipe = mealie.get_recipe(slug)
+        except Exception as e:
+            error_msg = (
+                f"Error setting recipe image from URL '{slug}': "
+                f"could not load recipe ({e})"
+            )
+            logger.error({"message": error_msg})
+            raise ToolError(error_msg)
+        recipe_id = recipe.get("id") if isinstance(recipe, dict) else None
+
+        # Ask Mealie to scrape the URL. Any failure here (transport error, HTTP
+        # 4xx/5xx, bad URL) becomes a structured ok=False rather than an
+        # exception, so a bulk import never trips a retry loop or kill switch on
+        # a single unusable image.
+        try:
+            mealie.scrape_recipe_image_from_url(slug, image_url)
+        except Exception as e:
+            logger.warning(
                 {
-                    "message": "Setting recipe image from URL",
+                    "message": "Mealie rejected image URL",
                     "slug": slug,
                     "url": image_url,
+                    "error": str(e),
                 }
             )
-            return mealie.scrape_recipe_image_from_url(slug, image_url)
-        except Exception as e:
-            error_msg = f"Error setting recipe image from URL '{slug}': {str(e)}"
-            logger.error({"message": error_msg})
-            logger.debug(
-                {"message": "Error traceback", "traceback": traceback.format_exc()}
+            return {
+                "ok": False,
+                "slug": slug,
+                "image_url": image_url,
+                "message": (
+                    f"Mealie could not fetch an image from {image_url} ({e}). "
+                    "The recipe still has no image. Do not retry other URLs in a "
+                    "loop; use generate_recipe_image to create one instead."
+                ),
+            }
+
+        # The scrape returned without error, but Mealie 200s even when nothing
+        # was stored. The recipe.image field is unreliable too, so check the
+        # actual media file.
+        if recipe_id and mealie.has_image(recipe_id):
+            logger.info(
+                {"message": "Recipe image set from URL", "slug": slug, "url": image_url}
             )
-            raise ToolError(error_msg)
+            return {
+                "ok": True,
+                "slug": slug,
+                "image_url": image_url,
+                "message": f"Set the recipe image from {image_url}.",
+            }
+
+        logger.warning(
+            {
+                "message": "Scrape reported success but no image was stored",
+                "slug": slug,
+                "url": image_url,
+            }
+        )
+        return {
+            "ok": False,
+            "slug": slug,
+            "image_url": image_url,
+            "message": (
+                f"Mealie accepted the request but stored no image from {image_url} "
+                "(the URL is likely not a directly fetchable image). The recipe "
+                "still has no image. Do not retry other URLs in a loop; use "
+                "generate_recipe_image to create one instead."
+            ),
+        }
 
     @mcp.tool()
     def upload_recipe_image_file(slug: str, image_path: str) -> Dict[str, Any]:

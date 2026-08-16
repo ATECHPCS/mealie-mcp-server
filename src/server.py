@@ -1,23 +1,21 @@
 import atexit
 import logging
 import os
+import threading
 import traceback
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
+from auto_image_backfill import auto_image_backfill_loop
 from mealie import MealieFetcher
 from prompts import register_prompts
 from tools import register_all_tools
 
-# Load environment variables first
 load_dotenv()
 
-# Get log level from environment variable with INFO as default
 log_level_name = os.getenv("LOG_LEVEL", "INFO")
 log_level = getattr(logging, log_level_name.upper(), logging.INFO)
-
-# Configure logging
 logging.basicConfig(
     level=log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -35,10 +33,7 @@ if not MEALIE_BASE_URL or not MEALIE_API_KEY:
     )
 
 try:
-    mealie = MealieFetcher(
-        base_url=MEALIE_BASE_URL,
-        api_key=MEALIE_API_KEY,
-    )
+    mealie = MealieFetcher(base_url=MEALIE_BASE_URL, api_key=MEALIE_API_KEY)
 except Exception as e:
     logger.error({"message": "Failed to initialize Mealie client", "error": str(e)})
     logger.debug({"message": "Error traceback", "traceback": traceback.format_exc()})
@@ -51,16 +46,62 @@ register_all_tools(mcp, mealie)
 
 
 def main():
+    transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
     try:
-        logger.info({"message": "Starting Mealie MCP Server"})
-        mcp.run(transport="stdio")
+        if transport in ("http", "streamable-http", "streamable_http"):
+            import uvicorn
+            from starlette.middleware.base import BaseHTTPMiddleware
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+            from starlette.routing import Route
+
+            from mcp.server.transport_security import TransportSecuritySettings
+
+            host = os.getenv("HOST", "0.0.0.0")
+            port = int(os.getenv("PORT", "3032"))
+            mcp.settings.host = host
+            mcp.settings.port = port
+            # This bridge is reached by name/IP over the LAN and is guarded by
+            # the API-key auth below, so the SDK's default localhost-only DNS
+            # rebinding host check (which 421s LAN requests) is turned off.
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            )
+
+            app = mcp.streamable_http_app()
+
+            async def _health(_request: Request):
+                return JSONResponse({"status": "ok", "service": "mealie-mcp"})
+
+            app.router.routes.insert(0, Route("/health", _health, methods=["GET"]))
+
+            threading.Thread(
+                target=auto_image_backfill_loop, args=(mealie,), name="auto-image-backfill", daemon=True
+            ).start()
+
+            keys = {k.strip() for k in os.getenv("MCP_API_KEYS", "").split(",") if k.strip()}
+            if os.getenv("MCP_AUTH", "").lower() == "api_key" and keys:
+                header = os.getenv("MCP_API_HEADER", "X-API-Key")
+
+                class ApiKeyMiddleware(BaseHTTPMiddleware):
+                    async def dispatch(self, request: Request, call_next):
+                        if request.url.path == "/health":
+                            return await call_next(request)
+                        if request.headers.get(header) not in keys:
+                            return JSONResponse({"error": "unauthorized"}, status_code=401)
+                        return await call_next(request)
+
+                app.add_middleware(ApiKeyMiddleware)
+                logger.info({"message": "Inbound API-key auth enabled", "header": header})
+
+            logger.info({"message": "Starting Mealie MCP Server (streamable-http)", "host": host, "port": port})
+            uvicorn.run(app, host=host, port=port)
+        else:
+            logger.info({"message": "Starting Mealie MCP Server (stdio)"})
+            mcp.run(transport="stdio")
     except Exception as e:
-        logger.critical(
-            {"message": "Fatal error in Mealie MCP Server", "error": str(e)}
-        )
-        logger.debug(
-            {"message": "Error traceback", "traceback": traceback.format_exc()}
-        )
+        logger.critical({"message": "Fatal error in Mealie MCP Server", "error": str(e)})
+        logger.debug({"message": "Error traceback", "traceback": traceback.format_exc()})
         raise
 
 

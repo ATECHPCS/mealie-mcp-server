@@ -30,7 +30,14 @@ async def test_create_recipe_accepts_flat_and_structured(invoke, fetcher):
     ings = body["recipeIngredient"]
     steps = body["recipeInstructions"]
 
-    assert ings[0]["note"] == "200 g basmati rice"
+    # plain string -> resolved via the ingredient parser, not left as a note
+    assert ings[0]["quantity"] == 1.0
+    assert ings[0]["unit"]["id"] == "existing-unit"
+    assert ings[0]["originalText"] == "200 g basmati rice"
+    # the parser didn't recognize the food, so it was created
+    food_create = fetcher.last("POST", "/api/foods")
+    assert food_create["json"]["name"] == "200 g basmati rice"
+    assert ings[0]["food"]["id"] == "generated-0001"
     assert ings[1]["quantity"] == 2
     assert ings[1]["food"] == {
         "id": "f1",
@@ -46,6 +53,31 @@ async def test_create_recipe_accepts_flat_and_structured(invoke, fetcher):
     assert steps[1]["ingredientReferences"] == [
         {"referenceId": "a1000001-0000-4000-8000-000000000001"}
     ]
+
+
+async def test_import_recipe_from_url_parses_scraped_ingredients(invoke, fetcher):
+    fetcher.recipe = {
+        **fetcher.recipe,
+        "recipeIngredient": [
+            {"note": "2 lb chicken thighs", "food": None, "referenceId": "ref-1"},
+            {"note": "", "food": None, "referenceId": "ref-2"},
+        ],
+    }
+
+    await invoke("import_recipe_from_url", url="https://example.com/r")
+
+    # only the non-blank, unresolved note gets sent to the parser
+    parse_call = fetcher.last("POST", "/api/parser/ingredients")
+    assert parse_call["json"]["ingredients"] == ["2 lb chicken thighs"]
+
+    patch = fetcher.last("PATCH", "/api/recipes/")["json"]
+    ings = patch["recipeIngredient"]
+    # the ingredient's own referenceId is preserved so instruction links survive
+    assert ings[0]["referenceId"] == "ref-1"
+    assert ings[0]["originalText"] == "2 lb chicken thighs"
+    assert ings[0]["food"]["id"] == "generated-0001"
+    # the blank entry was left untouched, not sent to the parser
+    assert ings[1] == {"note": "", "food": None, "referenceId": "ref-2"}
 
 
 async def test_create_recipe_full_sets_metadata_tags_tools_and_image(invoke, fetcher):
@@ -70,7 +102,8 @@ async def test_create_recipe_full_sets_metadata_tags_tools_and_image(invoke, fet
     assert body["totalTime"] == "30 min"
     assert body["recipeServings"] == 2
     assert body["recipeYield"] == "4 Portionen"
-    assert body["recipeIngredient"][0]["note"] == "1 onion"
+    assert body["recipeIngredient"][0]["originalText"] == "1 onion"
+    assert body["recipeIngredient"][0]["food"]["id"] == "generated-0001"
     # slug derived from the name (Mealie requires it on organizer refs)
     assert body["tags"] == [{"id": "t1", "name": "Quick", "slug": "quick"}]
     assert body["tools"][0]["id"] == "k1"

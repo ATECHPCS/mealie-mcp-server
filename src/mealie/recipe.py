@@ -159,6 +159,46 @@ class RecipeMixin:
         logger.info({"message": "Patching recipe", "slug": slug})
         return self._handle_request("PATCH", f"/api/recipes/{slug}", json=recipe_data)
 
+    def has_image(self, recipe_id: str) -> bool:
+        """Return True if the recipe has a real image FILE, not just the image field.
+
+        Mealie sets the recipe.image field to a cache-key string even when no
+        image was ever stored, so that field cannot be trusted. This checks the
+        actual media file.
+        """
+        if not recipe_id:
+            return False
+        for variant in ("original.webp", "min-original.webp"):
+            try:
+                resp = self._client.get(
+                    f"/api/media/recipes/{recipe_id}/images/{variant}"
+                )
+                if resp.status_code == 200 and len(resp.content) > 100:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def update_recipe_image_bytes(
+        self, slug: str, image_bytes: bytes, extension: str = "png"
+    ):
+        """Upload raw image bytes as a recipe's image (multipart form upload).
+
+        Args:
+            slug: Recipe slug.
+            image_bytes: Raw image file bytes.
+            extension: File extension without a dot (png, jpg, webp).
+        """
+        if not slug:
+            raise ValueError("Recipe slug cannot be empty")
+        if not image_bytes:
+            raise ValueError("Image bytes cannot be empty")
+        files = {"image": (f"image.{extension}", image_bytes, f"image/{extension}")}
+        data = {"extension": extension}
+        return self._handle_request(
+            "PUT", f"/api/recipes/{slug}/image", files=files, data=data
+        )
+
     def set_recipe_categories(self, slug: str, category_ids: List[str]) -> Dict[str, Any]:
         """Set the categories for a recipe, replacing any existing categories.
 

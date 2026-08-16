@@ -205,6 +205,39 @@ def test_distributive_preserves_internal_compound():
     assert _texts(cl) == ["1 tsp salt", "1 tsp macaroni and cheese", "1 tsp pepper"]
 
 
+def test_paren_per_suffix_does_not_swallow_food():
+    # "per bag frozen peas" must not be treated as a pure measure and dropped
+    cl = clean_line("2 bags (12 oz per bag frozen peas)")
+    assert cl.auto_safe is False
+
+
+def test_packaging_qualifier_paren_stays_auto():
+    # the food is OUTSIDE the parenthetical; "(14 oz can)" is just packaging
+    cl = clean_line("1 (14 oz can) diced tomatoes")
+    assert cl.auto_safe is True
+    assert _texts(cl) == ["1 diced tomatoes"]
+    cl2 = clean_line("1 (8 oz package) cream cheese")
+    assert cl2.auto_safe is True
+
+
+def test_non_oxford_distributive_is_held():
+    # "salt, pepper and paprika" — the trailing "and" is an ambiguous list join
+    cl = clean_line("1 tsp each salt, pepper and paprika")
+    assert cl.category == DISTRIBUTIVE
+    assert cl.auto_safe is False
+
+
+def test_compound_food_in_distributive_is_held():
+    cl = clean_line("1 tsp each salt, macaroni and cheese, pepper")
+    assert cl.auto_safe is False
+
+
+def test_clean_oxford_distributive_still_auto():
+    cl = clean_line("1 tsp each salt, pepper, and onion powder")
+    assert cl.auto_safe is True
+    assert _texts(cl) == ["1 tsp salt", "1 tsp pepper", "1 tsp onion powder"]
+
+
 def test_measured_ingredient_not_flagged_as_recipe_by_title():
     # a common ingredient with a quantity must not be mistaken for a sub-recipe
     # reference just because a recipe with that name exists

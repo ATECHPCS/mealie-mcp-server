@@ -108,12 +108,18 @@ _MEASURE_QUALIFIERS = {
     "drained", "packed", "sifted", "cooked", "raw", "uncooked", "diced",
     "chopped", "minced", "melted", "softened", "plus", "more", "or", "and",
     "the", "of", "a", "to", "weight", "net", "dry", "before", "after",
+    # packaging words — the food is outside the parenthetical, not these
+    "can", "cans", "package", "packages", "pkg", "bag", "bags", "box", "boxes",
+    "carton", "cartons", "container", "containers", "bottle", "bottles", "tub",
+    "tubs", "stick", "sticks", "block", "blocks", "sheet", "sheets", "slice",
+    "slices", "piece", "pieces", "clove", "cloves", "head", "heads", "stalk",
+    "stalks", "sprig", "sprigs", "pinch", "packet", "packets", "tin", "tins",
 }
 _AMOUNT_PAREN_RE = re.compile(
     r"^\s*(?:about\s+|approx\.?\s+)?"
     + _MEASURE
     + r"(?:\s*[/,]\s*" + _MEASURE + r")*"  # "/ 320 g", ", 479 g"
-    + r"(?:\s+per\s+[\w\s]+?)?"  # "per batch", "per jar"
+    + r"(?:\s+per\s+\w+)?"  # "per batch", "per jar" (single word only)
     + r"\s*$",
     re.IGNORECASE,
 )
@@ -361,8 +367,13 @@ def clean_line(raw: str, known_titles: Optional[set] = None) -> CleanedLine:
     # 1) distributive "N unit each A, B, C"
     dist = _try_distributive(stripped, base_note)
     if dist:
+        # A residual "and" in a split item is ambiguous — it could be a compound
+        # food ("macaroni and cheese") or a non-Oxford list joiner ("pepper and
+        # paprika"). We can't tell, so hold it for review rather than risk
+        # creating a merged food or wrongly splitting one.
+        ambiguous = any(re.search(r"\band\b", c.text, re.IGNORECASE) for c in dist)
         return CleanedLine(
-            raw, DISTRIBUTIVE, ACTION_PARSE, auto, dist,
+            raw, DISTRIBUTIVE, ACTION_PARSE, auto and not ambiguous, dist,
             "one amount distributed over several foods — split per food",
         )
 

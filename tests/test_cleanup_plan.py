@@ -143,6 +143,23 @@ def test_short_parser_response_blocks_auto():
     assert plan["lines"][0]["disposition"] in (REVIEW, "skip")
 
 
+def test_reordered_same_length_response_blocks_auto():
+    # a same-length response with missing/None inputs must not be trusted
+    raw = [_ing("Salt and pepper, to taste")]
+
+    def no_echo(texts):
+        # returns len==inputs but drops the `input` echo entirely
+        return [
+            {"confidence": {"average": 0.99},
+             "ingredient": {"food": {"name": "flour"}, "quantity": 1, "unit": None, "note": ""}}
+            for _ in texts
+        ]
+
+    plan = build_plan(raw, no_echo, food_names=[])
+    assert plan["counts"][AUTO] == 0
+    assert all(not p["ok"] for p in plan["lines"][0]["proposals"])
+
+
 def test_input_echo_mismatch_blocks_auto():
     raw = [_ing("2 lb chicken thighs")]
 

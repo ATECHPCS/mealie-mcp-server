@@ -172,8 +172,10 @@ def build_plan(
             food = ing_obj.get("food") or {}
             unit = ing_obj.get("unit") or {}
             conf = ((p or {}).get("confidence") or {}).get("average") or 0
-            # verify the parser echoed back the input we sent for this slot
-            input_ok = (p or {}).get("input") in (None, cand.text)
+            # verify the parser echoed back the exact input we sent for this
+            # slot — a missing/None or differing echo means we cannot trust the
+            # positional correlation (e.g. a same-length reordered response).
+            input_ok = (p or {}).get("input") == cand.text
             food_name = food.get("name")
             food_id = food.get("id")
             food_source = "none"

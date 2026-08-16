@@ -97,7 +97,19 @@ def test_suggest_blocked_matches_naive_exactly():
         "almond flour", "almond milk", "almond meal", "kosher salt", "sea salt",
         "table salt", "smoked paprika", "sweet paprika", "paprika",
     ]
-    for cutoff in (0.82, 0.86, 0.9):
+    # include pathological asymmetric strings + exact-boundary lengths
+    words = words + [
+        "bacbcbacabbbacbab", "cbcbabcbcbbacbab",  # ratio differs by arg order
+        "aa", "aaa",  # ratio exactly 0.8 at the length boundary
+    ]
+
+    def sym(a, b):
+        return max(
+            difflib.SequenceMatcher(None, a, b).ratio(),
+            difflib.SequenceMatcher(None, b, a).ratio(),
+        )
+
+    for cutoff in (0.8, 0.82, 0.86, 0.9):
         key_to_name = {}
         for n in words:
             key_to_name.setdefault(norm(n), n)
@@ -105,11 +117,16 @@ def test_suggest_blocked_matches_naive_exactly():
         naive = set()
         for i, ka in enumerate(keys):
             for kb in keys[i + 1:]:
-                s = difflib.SequenceMatcher(None, ka, kb).ratio()
-                if s >= cutoff and not _is_kept_distinct(key_to_name[ka], key_to_name[kb]):
+                if sym(ka, kb) >= cutoff and not _is_kept_distinct(key_to_name[ka], key_to_name[kb]):
                     naive.add(frozenset({key_to_name[ka], key_to_name[kb]}))
         blocked = {frozenset({a, b}) for a, b, _ in suggest_duplicate_clusters(words, cutoff=cutoff)}
         assert blocked == naive, f"mismatch at cutoff {cutoff}: {blocked ^ naive}"
+
+
+def test_suggest_cutoff_zero_does_not_crash():
+    # cutoff=0 is documented; must not ZeroDivisionError (returns all pairs)
+    pairs = suggest_duplicate_clusters(["a b", "a c", "d e"], cutoff=0)
+    assert len(pairs) == 3  # every distinct pair qualifies at cutoff 0
 
 
 def test_suggest_surfaces_near_dupes_but_not_kept_distinct():

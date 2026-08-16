@@ -182,18 +182,25 @@ def suggest_duplicate_clusters(
     Returns a de-duplicated, sorted list of (name_a, name_b, score) with
     KEEP_DISTINCT pairs suppressed. Read-only — merges nothing.
 
-    A naive all-pairs `SequenceMatcher` is O(n^2) and takes minutes on a
-    multi-thousand-food catalog (past the MCP tool timeout). Two exact
-    prefilters cut the work without changing the result — both are necessary
-    conditions for `ratio() >= cutoff`, so nothing that would have matched is
-    skipped:
+    The score is symmetric — `max` of `ratio()` in both argument orders, since
+    `difflib.SequenceMatcher.ratio()` is not order-invariant — so the result
+    does not depend on catalog ordering.
 
-      * length window — `ratio = 2*M/(la+lb)` with `M <= min(la, lb)`, so a
-        match needs `lb <= la*(2-cutoff)/cutoff`. Keys are sorted by length, so
-        once `lb` exceeds that bound we can stop scanning outward.
-      * character-multiset overlap — `M` (ordered matches) can't exceed the
-        shared character count, so `2*common/(la+lb) < cutoff` rules a pair out
-        before the expensive ratio() call.
+    A naive all-pairs scan is O(n^2) and takes minutes on a multi-thousand-food
+    catalog (past the MCP tool timeout). Two prefilters cut the work without
+    changing the result. Both are necessary conditions for a symmetric
+    `ratio() >= cutoff`: the number of matched characters `M` satisfies
+    `M <= min(la, lb)` and `M <= common` (shared character-multiset count), so
+    `ratio <= 2*min(la,lb)/(la+lb)` and `ratio <= 2*common/(la+lb)` in either
+    order. Written multiplicatively (no division — so `cutoff=0` is safe and
+    there is no float-boundary drop), with a small epsilon so an exact-boundary
+    pair is kept for the real `ratio()` call to judge:
+
+      * length window — with keys sorted by length (`la <= lb`),
+        `2*la < cutoff*(la+lb)` can only become *more* true as `lb` grows, so we
+        stop scanning outward once it holds.
+      * character-multiset overlap — `2*common < cutoff*(la+lb)` rules a pair
+        out before the expensive `ratio()` call.
     """
     key_to_name: Dict[str, str] = {}
     for n in catalog_names:
@@ -205,20 +212,23 @@ def suggest_duplicate_clusters(
         ((k, len(k), Counter(k)) for k in key_to_name),
         key=lambda e: e[1],
     )
-    span = (2 - cutoff) / cutoff  # max allowed lb/la ratio
+    eps = 1e-9
 
     out: List[Tuple[str, str, float]] = []
     for i, (ka, la, ca) in enumerate(entries):
         if la == 0:
             continue
-        max_lb = la * span
         for kb, lb, cb in entries[i + 1:]:
-            if lb > max_lb:
-                break  # sorted by length — every later kb is only longer
+            thresh = cutoff * (la + lb)
+            if 2 * la < thresh - eps:
+                break  # sorted by length — later kb only make this more true
             common = sum((ca & cb).values())
-            if 2 * common < cutoff * (la + lb):
-                continue  # can't reach cutoff even with a perfect ordered match
-            score = difflib.SequenceMatcher(None, ka, kb).ratio()
+            if 2 * common < thresh - eps:
+                continue  # not enough shared characters to reach the cutoff
+            score = max(
+                difflib.SequenceMatcher(None, ka, kb).ratio(),
+                difflib.SequenceMatcher(None, kb, ka).ratio(),
+            )
             if score < cutoff:
                 continue
             na, nb = key_to_name[ka], key_to_name[kb]

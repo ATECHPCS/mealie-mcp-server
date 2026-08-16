@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from utils import format_api_params
 
@@ -121,3 +121,55 @@ class FoodsMixin:
 
         logger.info({"message": "Deleting food", "food_id": food_id})
         return self._handle_request("DELETE", f"/api/foods/{food_id}")
+
+    def get_all_foods(self, page_size: int = 100) -> List[Dict[str, Any]]:
+        """Fetch the entire food catalog, following pagination.
+
+        The catalog can hold thousands of entries; a single un-paginated call
+        silently truncates, so we page through until every item is collected.
+
+        Returns:
+            List[Dict[str, Any]]: All food objects (id + name at minimum).
+        """
+        items: List[Dict[str, Any]] = []
+        page = 1
+        while True:
+            resp = self._handle_request(
+                "GET", "/api/foods", params={"page": page, "perPage": page_size}
+            )
+            batch = (resp or {}).get("items", []) if isinstance(resp, dict) else []
+            items.extend(batch)
+            total = (resp or {}).get("total") if isinstance(resp, dict) else None
+            if not batch or (total is not None and len(items) >= total):
+                break
+            page += 1
+        logger.info({"message": "Fetched full food catalog", "count": len(items)})
+        return items
+
+    def merge_foods(self, from_food_id: str, to_food_id: str) -> Dict[str, Any]:
+        """Merge one food into another via Mealie's native merge.
+
+        Every recipe reference to `from_food_id` is repointed at `to_food_id`
+        and the source food is deleted. Use this to collapse duplicates
+        ("hot water" -> "water") without hand-editing recipes.
+
+        Args:
+            from_food_id: UUID of the duplicate food to remove.
+            to_food_id: UUID of the canonical food to keep.
+
+        Returns:
+            JSON response from the merge endpoint.
+        """
+        if not from_food_id or not to_food_id:
+            raise ValueError("Both food IDs are required")
+        if from_food_id == to_food_id:
+            raise ValueError("Cannot merge a food into itself")
+
+        logger.info(
+            {"message": "Merging foods", "from": from_food_id, "to": to_food_id}
+        )
+        return self._handle_request(
+            "PUT",
+            "/api/foods/merge",
+            json={"fromFood": from_food_id, "toFood": to_food_id},
+        )

@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import traceback
 import uuid
@@ -109,6 +110,61 @@ def _parse_scraped_ingredients(
 
     mealie.patch_recipe(slug, {"recipeIngredient": updated})
     return mealie.get_recipe(slug)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    return os.getenv(name, "true" if default else "false").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _clean_ingredients_after_save(
+    mealie: MealieFetcher, slug: str, recipe: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Structure a freshly saved/scraped recipe's ingredients.
+
+    When MEALIE_IMPORT_AUTO_CLEANUP is on (default), run the ingredient cleanup —
+    splitting "salt and pepper" compounds and "1 tsp each A,B,C" distributions,
+    stripping measure noise, promoting section headers, and deduping foods — so
+    downstream consumers (notably the Grocy importer) don't see those raw notes.
+    This subsumes the basic NLP pass.
+
+    By default only the deterministic (auto) fixes are applied; genuinely
+    ambiguous lines ("X or Y" alternatives, low-confidence parses,
+    food-in-parenthetical, instruction-referenced expansions) are LEFT as notes
+    rather than auto-resolved — applying those unattended can mint a wrong food
+    or orphan a step link. Set MEALIE_IMPORT_CLEANUP_REVIEWS=true to also apply
+    the best-guess review fixes (keep-first for alternatives).
+
+    Fail-safe by construction: any failure falls back to the basic parse, and if
+    that fails too the original recipe is returned — an import never raises here.
+    """
+    if not _env_flag("MEALIE_IMPORT_AUTO_CLEANUP", True):
+        try:
+            return _parse_scraped_ingredients(mealie, slug, recipe)
+        except Exception:  # noqa: BLE001
+            logger.warning({"message": "basic parse failed on import", "slug": slug,
+                            "traceback": traceback.format_exc()})
+            return recipe
+    try:
+        mealie.apply_recipe_cleanup(
+            slug, apply_reviews=_env_flag("MEALIE_IMPORT_CLEANUP_REVIEWS", False)
+        )
+        return mealie.get_recipe(slug)
+    except Exception:  # noqa: BLE001 — cleanup must never break an import
+        logger.warning(
+            {"message": "auto-cleanup failed; falling back to basic parse", "slug": slug,
+             "traceback": traceback.format_exc()}
+        )
+    try:
+        return _parse_scraped_ingredients(mealie, slug, mealie.get_recipe(slug))
+    except Exception:  # noqa: BLE001 — last resort: return what we have
+        logger.warning({"message": "basic-parse fallback also failed", "slug": slug,
+                        "traceback": traceback.format_exc()})
+        try:
+            return mealie.get_recipe(slug)
+        except Exception:  # noqa: BLE001
+            return recipe
 
 
 def _build_instruction(
@@ -366,9 +422,14 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         wrong recipe — always confirm the returned `name` matches what was
         requested.
 
-        Mealie's scraper stores ingredients as unparsed text; this tool runs
-        them through Mealie's ingredient parser and saves the structured
-        quantity/unit/food back onto the recipe before returning it.
+        Mealie's scraper stores ingredients as unparsed text; this tool runs the
+        ingredient cleanup (structured quantity/unit/food, plus splitting
+        "salt and pepper" compounds, promoting section headers, and deduping
+        foods) and saves the result before returning — so downstream consumers
+        (e.g. the Grocy importer) get clean data. Toggle with
+        MEALIE_IMPORT_AUTO_CLEANUP (default on). By default only deterministic
+        fixes apply; set MEALIE_IMPORT_CLEANUP_REVIEWS=true to also auto-resolve
+        ambiguous "X or Y" alternatives (keep-first).
 
         Args:
             url: Source URL of the recipe to import.
@@ -383,7 +444,7 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
             logger.info({"message": "Importing recipe from URL", "url": url})
             slug = mealie.import_recipe_from_url(url, include_tags=include_tags)
             recipe = mealie.get_recipe(slug)
-            return _parse_scraped_ingredients(mealie, slug, recipe)
+            return _clean_ingredients_after_save(mealie, slug, recipe)
         except Exception as e:
             error_msg = f"Error importing recipe from URL '{url}': {str(e)}"
             logger.error({"message": error_msg})

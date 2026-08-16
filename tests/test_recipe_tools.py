@@ -55,7 +55,10 @@ async def test_create_recipe_accepts_flat_and_structured(invoke, fetcher):
     ]
 
 
-async def test_import_recipe_from_url_parses_scraped_ingredients(invoke, fetcher):
+async def test_import_recipe_from_url_parses_scraped_ingredients(invoke, fetcher, monkeypatch):
+    # exercise the basic-parse path (the opt-out / fail-safe fallback); the
+    # default advanced-cleanup-on-import path is covered in test_import_cleanup
+    monkeypatch.setenv("MEALIE_IMPORT_AUTO_CLEANUP", "false")
     fetcher.recipe = {
         **fetcher.recipe,
         "recipeIngredient": [

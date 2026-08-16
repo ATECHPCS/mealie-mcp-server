@@ -153,3 +153,76 @@ async def test_get_recipe_concise_includes_orgurl_tags_tools(invoke, fetcher):
     assert out["orgURL"] == "https://example.com/r"
     assert out["tags"] == [{"id": "t1", "name": "Quick", "slug": "quick"}]
     assert out["tools"][0]["name"] == "Pfanne"
+
+
+# --- set_recipe_image_from_url resiliency ------------------------------------
+# Mealie's scrape endpoint 200s even when it stored no image, so the tool must
+# verify the real media file (has_image) and return an honest, per-call
+# result instead of a bland success that invites a blind retry loop.
+
+async def test_set_recipe_image_from_url_ok_when_image_lands(invoke, fetcher):
+    fetcher.has_image = lambda recipe_id: True
+
+    out = await invoke(
+        "set_recipe_image_from_url",
+        slug="test-recipe",
+        image_url="https://example.com/pic.jpg",
+    )
+
+    assert out["ok"] is True
+    assert out["image_url"] == "https://example.com/pic.jpg"
+    # it actually asked Mealie to scrape the URL
+    scrape = fetcher.last("POST", "/api/recipes/test-recipe/image")
+    assert scrape["json"] == {"url": "https://example.com/pic.jpg"}
+
+
+async def test_set_recipe_image_from_url_reports_failure_when_no_image_stored(
+    invoke, fetcher
+):
+    # default FakeFetcher.has_image resolves False (no _client media file)
+    out = await invoke(
+        "set_recipe_image_from_url",
+        slug="test-recipe",
+        image_url="https://example.com/not-an-image",
+    )
+
+    assert out["ok"] is False
+    assert out["image_url"] == "https://example.com/not-an-image"
+    # steers the caller off the retry loop and toward generation
+    assert "generate_recipe_image" in out["message"]
+
+
+async def test_set_recipe_image_from_url_swallows_scrape_error(invoke, fetcher):
+    def boom(slug, image_url):
+        raise RuntimeError("422 Unprocessable Entity")
+
+    fetcher.scrape_recipe_image_from_url = boom
+
+    # must NOT raise a ToolError; returns a structured ok=False instead
+    out = await invoke(
+        "set_recipe_image_from_url",
+        slug="test-recipe",
+        image_url="https://example.com/blocked.jpg",
+    )
+
+    assert out["ok"] is False
+    assert "422" in out["message"]
+    assert "generate_recipe_image" in out["message"]
+
+
+async def test_create_recipe_full_survives_bad_image_url(invoke, fetcher):
+    def boom(slug, image_url):
+        raise RuntimeError("could not fetch image")
+
+    fetcher.scrape_recipe_image_from_url = boom
+
+    # the recipe is created even though the image scrape blows up
+    out = await invoke(
+        "create_recipe_full",
+        name="Imageless",
+        image_url="https://example.com/dead.jpg",
+    )
+
+    assert isinstance(out, dict)
+    # the create/update happened despite the image failure
+    assert fetcher.last("PUT", "/api/recipes/") is not None

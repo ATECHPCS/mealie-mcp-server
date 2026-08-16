@@ -27,15 +27,88 @@ def _build_ingredient(
 ) -> RecipeIngredient:
     """Coerce a flat string or structured ingredient into a RecipeIngredient.
 
-    A plain string becomes a note for Mealie's natural-language parser to
-    resolve; a structured object maps its fields straight onto the Mealie
-    RecipeIngredient model.
+    A plain string becomes an unparsed note; callers that want quantity/unit/
+    food resolved should run strings through _build_ingredients instead, which
+    calls Mealie's parser before falling back to this for structured entries.
     """
     if isinstance(ingredient, str):
         return RecipeIngredient(note=ingredient)
     if isinstance(ingredient, RecipeIngredientInput):
         ingredient = ingredient.model_dump(exclude_none=True)
     return RecipeIngredient(**ingredient)
+
+
+def _resolve_parsed_ingredient(
+    mealie: MealieFetcher, parsed: Dict[str, Any], original_text: str
+) -> RecipeIngredient:
+    """Turn one Mealie NLP parser result into a RecipeIngredient.
+
+    The parser matches quantity/unit/food against the household's existing
+    catalog when it can; anything it doesn't recognize comes back with a null
+    id, and Mealie's recipe save rejects a food/unit reference with no id, so
+    create it first.
+    """
+    data = dict(parsed.get("ingredient") or {})
+    unit = data.get("unit")
+    if unit and not unit.get("id"):
+        unit["id"] = mealie.create_unit(unit["name"]).get("id")
+    food = data.get("food")
+    if food and not food.get("id"):
+        food["id"] = mealie.create_food(food["name"]).get("id")
+    data["originalText"] = original_text
+    return RecipeIngredient(**data)
+
+
+def _build_ingredients(
+    mealie: MealieFetcher,
+    ingredients: List[Union[str, RecipeIngredientInput, Dict[str, Any]]],
+) -> List[RecipeIngredient]:
+    """Build a RecipeIngredient list, running plain strings through Mealie's
+    ingredient parser so they land with structured quantity/unit/food instead
+    of an unparsed note. Structured entries pass through _build_ingredient
+    unchanged.
+    """
+    built: List[Optional[RecipeIngredient]] = [None] * len(ingredients)
+    to_parse = []
+    for idx, item in enumerate(ingredients):
+        if isinstance(item, str):
+            to_parse.append((idx, item))
+        else:
+            built[idx] = _build_ingredient(item)
+    if to_parse:
+        parsed = mealie.parse_ingredients([text for _, text in to_parse])
+        for (idx, text), result in zip(to_parse, parsed):
+            built[idx] = _resolve_parsed_ingredient(mealie, result, text)
+    return built
+
+
+def _parse_scraped_ingredients(
+    mealie: MealieFetcher, slug: str, recipe: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Mealie's URL scraper stores ingredients as unparsed notes; run any that
+    still lack a resolved food through the NLP parser and patch the result
+    back onto the recipe, preserving each ingredient's referenceId.
+    """
+    raw = recipe.get("recipeIngredient") or []
+    targets = [
+        (idx, ing)
+        for idx, ing in enumerate(raw)
+        if (ing.get("note") or "").strip() and not ing.get("food")
+    ]
+    if not targets:
+        return recipe
+
+    parsed = mealie.parse_ingredients([ing["note"] for _, ing in targets])
+    updated = list(raw)
+    for (idx, ing), result in zip(targets, parsed):
+        resolved = _resolve_parsed_ingredient(mealie, result, ing["note"])
+        payload = resolved.model_dump(exclude_none=True)
+        if ing.get("referenceId"):
+            payload["referenceId"] = ing["referenceId"]
+        updated[idx] = payload
+
+    mealie.patch_recipe(slug, {"recipeIngredient": updated})
+    return mealie.get_recipe(slug)
 
 
 def _build_instruction(
@@ -263,7 +336,7 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
             slug = mealie.create_recipe(name)
             recipe_json = mealie.get_recipe(slug)
             recipe = Recipe.model_validate(recipe_json)
-            recipe.recipeIngredient = [_build_ingredient(i) for i in ingredients]
+            recipe.recipeIngredient = _build_ingredients(mealie, ingredients)
             recipe.recipeInstructions = [_build_instruction(i) for i in instructions]
             _normalize_references(recipe)
             return mealie.update_recipe(slug, recipe.model_dump(exclude_none=True))
@@ -293,6 +366,10 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         wrong recipe — always confirm the returned `name` matches what was
         requested.
 
+        Mealie's scraper stores ingredients as unparsed text; this tool runs
+        them through Mealie's ingredient parser and saves the structured
+        quantity/unit/food back onto the recipe before returning it.
+
         Args:
             url: Source URL of the recipe to import.
             include_tags: If True, import tags Mealie extracts from the source.
@@ -305,7 +382,8 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         try:
             logger.info({"message": "Importing recipe from URL", "url": url})
             slug = mealie.import_recipe_from_url(url, include_tags=include_tags)
-            return mealie.get_recipe(slug)
+            recipe = mealie.get_recipe(slug)
+            return _parse_scraped_ingredients(mealie, slug, recipe)
         except Exception as e:
             error_msg = f"Error importing recipe from URL '{url}': {str(e)}"
             logger.error({"message": error_msg})
@@ -337,7 +415,7 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
             logger.info({"message": "Updating recipe", "slug": slug})
             recipe_json = mealie.get_recipe(slug)
             recipe = Recipe.model_validate(recipe_json)
-            recipe.recipeIngredient = [_build_ingredient(i) for i in ingredients]
+            recipe.recipeIngredient = _build_ingredients(mealie, ingredients)
             recipe.recipeInstructions = [_build_instruction(i) for i in instructions]
             _normalize_references(recipe)
             return mealie.update_recipe(slug, recipe.model_dump(exclude_none=True))
@@ -419,7 +497,7 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
             if servings is not None:
                 recipe.recipeServings = servings
             if ingredients is not None:
-                recipe.recipeIngredient = [_build_ingredient(i) for i in ingredients]
+                recipe.recipeIngredient = _build_ingredients(mealie, ingredients)
             if instructions is not None:
                 recipe.recipeInstructions = [
                     _build_instruction(i) for i in instructions

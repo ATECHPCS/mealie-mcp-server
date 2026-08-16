@@ -59,6 +59,8 @@ class FakeFetcher(MealieFetcher):
                 # reflect the created name on subsequent GET (like the real API)
                 self.recipe = {**self.recipe, "name": name, "slug": self.created_slug}
             return self.created_slug
+        if method == "POST" and url == "/api/recipes/create/url":
+            return self.created_slug
         if method == "GET" and url.startswith("/api/recipes/") and url.count("/") == 3:
             return dict(self.recipe)
         if method in ("PUT", "PATCH") and url.startswith("/api/recipes/"):
@@ -97,6 +99,23 @@ class FakeFetcher(MealieFetcher):
                 "userId": "user-1",
                 "name": "Existing list",
             }
+        if method == "POST" and url == "/api/parser/ingredients":
+            ingredients = (kwargs.get("json") or {}).get("ingredients") or []
+            return [
+                {
+                    "input": text,
+                    "confidence": {},
+                    "ingredient": {
+                        "quantity": 1.0,
+                        "unit": {"id": "existing-unit", "name": "cup"},
+                        "food": {"id": None, "name": text},
+                        "note": "",
+                        "originalText": None,
+                        "referenceId": None,
+                    },
+                }
+                for text in ingredients
+            ]
         # list endpoints
         if method == "GET" and url in (
             "/api/foods",

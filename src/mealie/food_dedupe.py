@@ -181,27 +181,59 @@ def suggest_duplicate_clusters(
 
     Returns a de-duplicated, sorted list of (name_a, name_b, score) with
     KEEP_DISTINCT pairs suppressed. Read-only — merges nothing.
-    """
-    keys = [norm(n) for n in catalog_names]
-    key_to_name: Dict[str, str] = {}
-    for n, k in zip(catalog_names, keys):
-        key_to_name.setdefault(k, n)
-    unique_keys = list(key_to_name)
 
-    seen: set = set()
+    The score is symmetric — `max` of `ratio()` in both argument orders, since
+    `difflib.SequenceMatcher.ratio()` is not order-invariant — so the result
+    does not depend on catalog ordering.
+
+    A naive all-pairs scan is O(n^2) and takes minutes on a multi-thousand-food
+    catalog (past the MCP tool timeout). Two prefilters cut the work without
+    changing the result. Both are necessary conditions for a symmetric
+    `ratio() >= cutoff`: the number of matched characters `M` satisfies
+    `M <= min(la, lb)` and `M <= common` (shared character-multiset count), so
+    `ratio <= 2*min(la,lb)/(la+lb)` and `ratio <= 2*common/(la+lb)` in either
+    order. Written multiplicatively (no division — so `cutoff=0` is safe and
+    there is no float-boundary drop), with a small epsilon so an exact-boundary
+    pair is kept for the real `ratio()` call to judge:
+
+      * length window — with keys sorted by length (`la <= lb`),
+        `2*la < cutoff*(la+lb)` can only become *more* true as `lb` grows, so we
+        stop scanning outward once it holds.
+      * character-multiset overlap — `2*common < cutoff*(la+lb)` rules a pair
+        out before the expensive `ratio()` call.
+    """
+    key_to_name: Dict[str, str] = {}
+    for n in catalog_names:
+        key_to_name.setdefault(norm(n), n)
+
+    from collections import Counter
+
+    entries = sorted(
+        ((k, len(k), Counter(k)) for k in key_to_name),
+        key=lambda e: e[1],
+    )
+    eps = 1e-9
+
     out: List[Tuple[str, str, float]] = []
-    for i, ka in enumerate(unique_keys):
-        for kb in unique_keys[i + 1:]:
-            score = difflib.SequenceMatcher(None, ka, kb).ratio()
+    for i, (ka, la, ca) in enumerate(entries):
+        # No `la == 0` guard: an empty key is excluded at any real cutoff by the
+        # length break below (2*0 < cutoff*lb), while cutoff=0 correctly pairs it.
+        for kb, lb, cb in entries[i + 1:]:
+            thresh = cutoff * (la + lb)
+            if 2 * la < thresh - eps:
+                break  # sorted by length — later kb only make this more true
+            common = sum((ca & cb).values())
+            if 2 * common < thresh - eps:
+                continue  # not enough shared characters to reach the cutoff
+            score = max(
+                difflib.SequenceMatcher(None, ka, kb).ratio(),
+                difflib.SequenceMatcher(None, kb, ka).ratio(),
+            )
             if score < cutoff:
                 continue
             na, nb = key_to_name[ka], key_to_name[kb]
             if _is_kept_distinct(na, nb):
                 continue
-            pair = frozenset({ka, kb})
-            if pair in seen:
-                continue
-            seen.add(pair)
             out.append((na, nb, round(score, 3)))
     out.sort(key=lambda t: t[2], reverse=True)
     return out

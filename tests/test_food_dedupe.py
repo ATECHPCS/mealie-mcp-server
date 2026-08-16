@@ -81,6 +81,67 @@ def test_identical_name_is_not_a_duplicate_of_itself():
     assert find_duplicate("olive oil", catalog) is None
 
 
+def test_suggest_blocked_matches_naive_exactly():
+    # the prefilters must not change results — compare against a brute-force
+    # reference over a varied word list
+    import difflib
+
+    from mealie.food_dedupe import _is_kept_distinct, norm
+
+    words = [
+        "canned pear", "canned pea", "canned peach", "oat milk", "goat milk",
+        "chicken breast", "chicken thighs", "chicken roast", "olive oil",
+        "olive oyl", "red bell pepper", "green bell pepper", "bell pepper",
+        "sugar", "sugars", "brown sugar", "raw sugar", "octopus", "octopuse",
+        "water", "hot water", "sparkling water", "flour", "rice flour",
+        "almond flour", "almond milk", "almond meal", "kosher salt", "sea salt",
+        "table salt", "smoked paprika", "sweet paprika", "paprika",
+    ]
+    # include pathological asymmetric strings + exact-boundary lengths
+    words = words + [
+        "bacbcbacabbbacbab", "cbcbabcbcbbacbab",  # ratio differs by arg order
+        "aa", "aaa",  # ratio exactly 0.8 at the length boundary
+    ]
+
+    def sym(a, b):
+        return max(
+            difflib.SequenceMatcher(None, a, b).ratio(),
+            difflib.SequenceMatcher(None, b, a).ratio(),
+        )
+
+    for cutoff in (0.8, 0.82, 0.86, 0.9):
+        key_to_name = {}
+        for n in words:
+            key_to_name.setdefault(norm(n), n)
+        keys = list(key_to_name)
+        naive = set()
+        for i, ka in enumerate(keys):
+            for kb in keys[i + 1:]:
+                if sym(ka, kb) >= cutoff and not _is_kept_distinct(key_to_name[ka], key_to_name[kb]):
+                    naive.add(frozenset({key_to_name[ka], key_to_name[kb]}))
+        blocked = {frozenset({a, b}) for a, b, _ in suggest_duplicate_clusters(words, cutoff=cutoff)}
+        assert blocked == naive, f"mismatch at cutoff {cutoff}: {blocked ^ naive}"
+
+
+def test_suggest_cutoff_zero_does_not_crash():
+    # cutoff=0 is documented; must not ZeroDivisionError (returns all pairs)
+    pairs = suggest_duplicate_clusters(["a b", "a c", "d e"], cutoff=0)
+    assert len(pairs) == 3  # every distinct pair qualifies at cutoff 0
+
+
+def test_suggest_cutoff_zero_includes_empty_normalized_name():
+    # a punctuation-only name normalizes to "" — at cutoff 0 it still pairs
+    pairs = suggest_duplicate_clusters(["---", "a", "b"], cutoff=0)
+    assert len(pairs) == 3  # every pair, including those with the empty key
+
+
+def test_empty_normalized_name_excluded_at_real_cutoff():
+    # but an empty key never spuriously matches at a normal cutoff
+    pairs = suggest_duplicate_clusters(["---", "olive oil", "olive oyl"], cutoff=0.86)
+    flat = {frozenset({a, b}) for a, b, _ in pairs}
+    assert all("---" not in p for p in flat)
+
+
 def test_suggest_surfaces_near_dupes_but_not_kept_distinct():
     catalog = [
         "plain Greek yogurt",

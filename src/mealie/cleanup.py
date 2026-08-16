@@ -58,6 +58,32 @@ def _is_unstructured(ing: Dict[str, Any]) -> bool:
     return bool(_line_text(ing)) and not (ing.get("food") or {}).get("id")
 
 
+def held_lines(
+    plan: Dict[str, Any], dry_run: bool = True, apply_reviews: bool = False
+) -> List[Dict[str, Any]]:
+    """The lines from a plan that still need a human after an apply.
+
+    A recipe_ref is always held. A review line is held unless this apply would
+    actually clear it — i.e. it's a real (non-dry) run with apply_reviews on and
+    the line has at least one structurally-valid proposal. This keeps a caller's
+    reported review queue honest instead of echoing the pre-apply plan.
+    """
+    out: List[Dict[str, Any]] = []
+    for ln in plan.get("lines", []):
+        d = ln.get("disposition")
+        if d == RECIPE_REF:
+            out.append(ln)
+        elif d == REVIEW:
+            cleared = (
+                not dry_run
+                and apply_reviews
+                and any(p.get("structurally_valid") for p in ln.get("proposals", []))
+            )
+            if not cleared:
+                out.append(ln)
+    return out
+
+
 def _referenced_ids(recipe: Dict[str, Any]) -> set:
     """referenceIds that a recipe's instruction steps link to.
 

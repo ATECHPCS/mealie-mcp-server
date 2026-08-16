@@ -5,6 +5,60 @@ import os
 logger = logging.getLogger("mealie-mcp")
 
 
+def generate_recipe_image_core(mealie, slug: str, details: str = "", force: bool = False) -> dict:
+    """Generate a food photo with OpenAI gpt-image and set it as the recipe image.
+
+    Shared by the generate_recipe_image MCP tool and the background
+    auto-image backfill loop (auto_image_backfill.py) so both go through the
+    exact same generation/upload path.
+
+    Safe to call after every import: it checks whether a REAL image file
+    already exists and only generates when one is missing (the recipe.image
+    field is unreliable, so do not gate on it yourself). Creates a realistic,
+    appetizing photograph of the finished dish and uploads it to Mealie.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"error": "OPENAI_API_KEY is not configured on the mealie bridge."}
+    try:
+        recipe = mealie.get_recipe(slug)
+    except Exception as e:
+        return {"error": f"Could not load recipe '{slug}': {e}"}
+    recipe_id = recipe.get("id") if isinstance(recipe, dict) else None
+    if not force and recipe_id and mealie.has_image(recipe_id):
+        return {
+            "skipped": True,
+            "slug": slug,
+            "message": "Recipe already has a real image, not regenerating (pass force=true to override).",
+        }
+    name = (recipe.get("name") or slug) if isinstance(recipe, dict) else slug
+    desc = details or (recipe.get("description") if isinstance(recipe, dict) else "") or ""
+    prompt = (
+        f"A professional, appetizing food photograph of {name}. {desc} "
+        "Natural soft lighting, shallow depth of field, plated on a clean "
+        "neutral surface, realistic, high detail, no text and no watermark."
+    ).strip()
+    model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+    size = os.getenv("OPENAI_IMAGE_SIZE", "1024x1024")
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+        result = client.images.generate(model=model, prompt=prompt, size=size, n=1)
+        b64 = result.data[0].b64_json
+        if not b64:
+            return {"error": "Image model returned no image data."}
+        image_bytes = base64.b64decode(b64)
+    except Exception as e:
+        return {"error": f"Image generation failed ({model}): {e}"}
+    try:
+        mealie.update_recipe_image_bytes(slug, image_bytes, "png")
+    except Exception as e:
+        return {"error": f"Image generated but upload to Mealie failed: {e}"}
+    logger.info({"message": "Generated and set recipe image", "slug": slug, "model": model})
+    return {"ok": True, "slug": slug, "message": f"Generated and set an image for '{name}'."}
+
+
 def register_image_gen_tools(mcp, mealie):
     @mcp.tool()
     def generate_recipe_image(slug: str, details: str = "", force: bool = False) -> dict:
@@ -15,51 +69,17 @@ def register_image_gen_tools(mcp, mealie):
         field is unreliable, so do not gate on it yourself). Creates a realistic,
         appetizing photograph of the finished dish and uploads it to Mealie.
 
+        Note: a background loop (auto_image_backfill.py) also does this
+        automatically AUTO_IMAGE_BACKFILL_DELAY_MINUTES after a recipe is
+        created if it still has no image by then, so calling this tool
+        manually right after import is optional, not required.
+
         Args:
             slug: The recipe slug to add an image to.
             details: Optional extra guidance for the photo (key ingredients or
                 plating). If empty, the recipe name and description are used.
         """
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            return {"error": "OPENAI_API_KEY is not configured on the mealie bridge."}
-        try:
-            recipe = mealie.get_recipe(slug)
-        except Exception as e:
-            return {"error": f"Could not load recipe '{slug}': {e}"}
-        recipe_id = recipe.get("id") if isinstance(recipe, dict) else None
-        if not force and recipe_id and mealie.has_image(recipe_id):
-            return {
-                "skipped": True,
-                "slug": slug,
-                "message": "Recipe already has a real image, not regenerating (pass force=true to override).",
-            }
-        name = (recipe.get("name") or slug) if isinstance(recipe, dict) else slug
-        desc = details or (recipe.get("description") if isinstance(recipe, dict) else "") or ""
-        prompt = (
-            f"A professional, appetizing food photograph of {name}. {desc} "
-            "Natural soft lighting, shallow depth of field, plated on a clean "
-            "neutral surface, realistic, high detail, no text and no watermark."
-        ).strip()
-        model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
-        size = os.getenv("OPENAI_IMAGE_SIZE", "1024x1024")
-        try:
-            from openai import OpenAI
-
-            client = OpenAI(api_key=api_key)
-            result = client.images.generate(model=model, prompt=prompt, size=size, n=1)
-            b64 = result.data[0].b64_json
-            if not b64:
-                return {"error": "Image model returned no image data."}
-            image_bytes = base64.b64decode(b64)
-        except Exception as e:
-            return {"error": f"Image generation failed ({model}): {e}"}
-        try:
-            mealie.update_recipe_image_bytes(slug, image_bytes, "png")
-        except Exception as e:
-            return {"error": f"Image generated but upload to Mealie failed: {e}"}
-        logger.info({"message": "Generated and set recipe image", "slug": slug, "model": model})
-        return {"ok": True, "slug": slug, "message": f"Generated and set an image for '{name}'."}
+        return generate_recipe_image_core(mealie, slug, details, force)
 
 
     @mcp.tool()

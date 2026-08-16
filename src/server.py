@@ -1,11 +1,13 @@
 import atexit
 import logging
 import os
+import threading
 import traceback
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
+from auto_image_backfill import auto_image_backfill_loop
 from mealie import MealieFetcher
 from prompts import register_prompts
 from tools import register_all_tools
@@ -72,6 +74,10 @@ def main():
                 return JSONResponse({"status": "ok", "service": "mealie-mcp"})
 
             app.router.routes.insert(0, Route("/health", _health, methods=["GET"]))
+
+            threading.Thread(
+                target=auto_image_backfill_loop, args=(mealie,), name="auto-image-backfill", daemon=True
+            ).start()
 
             keys = {k.strip() for k in os.getenv("MCP_API_KEYS", "").split(",") if k.strip()}
             if os.getenv("MCP_AUTH", "").lower() == "api_key" and keys:

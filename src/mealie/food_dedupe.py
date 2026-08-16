@@ -216,8 +216,8 @@ def suggest_duplicate_clusters(
 
     out: List[Tuple[str, str, float]] = []
     for i, (ka, la, ca) in enumerate(entries):
-        if la == 0:
-            continue
+        # No `la == 0` guard: an empty key is excluded at any real cutoff by the
+        # length break below (2*0 < cutoff*lb), while cutoff=0 correctly pairs it.
         for kb, lb, cb in entries[i + 1:]:
             thresh = cutoff * (la + lb)
             if 2 * la < thresh - eps:

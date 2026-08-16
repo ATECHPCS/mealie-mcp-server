@@ -129,6 +129,19 @@ def test_suggest_cutoff_zero_does_not_crash():
     assert len(pairs) == 3  # every distinct pair qualifies at cutoff 0
 
 
+def test_suggest_cutoff_zero_includes_empty_normalized_name():
+    # a punctuation-only name normalizes to "" — at cutoff 0 it still pairs
+    pairs = suggest_duplicate_clusters(["---", "a", "b"], cutoff=0)
+    assert len(pairs) == 3  # every pair, including those with the empty key
+
+
+def test_empty_normalized_name_excluded_at_real_cutoff():
+    # but an empty key never spuriously matches at a normal cutoff
+    pairs = suggest_duplicate_clusters(["---", "olive oil", "olive oyl"], cutoff=0.86)
+    flat = {frozenset({a, b}) for a, b, _ in pairs}
+    assert all("---" not in p for p in flat)
+
+
 def test_suggest_surfaces_near_dupes_but_not_kept_distinct():
     catalog = [
         "plain Greek yogurt",

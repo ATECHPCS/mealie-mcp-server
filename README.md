@@ -176,6 +176,28 @@ Restart Claude Desktop to load the server.
 - `update_food` - Update food
 - `delete_food` - Delete food
 
+### Ingredient Cleanup & Dedupe Tools (4 operations)
+- `cleanup_recipe_ingredients` - Re-parse & clean one recipe's unstructured
+  ingredient lines (split "salt and pepper", distribute "1 tsp each A, B, C",
+  strip measure noise, keep the first of "X or Y" with the rest as a note,
+  promote "For the sauce:" headers, flag sub-recipe refs, dedupe new foods).
+  Dry-run by default; `dry_run=False` applies the deterministic fixes.
+- `cleanup_all_recipes` - Same sweep across the whole library, with a combined
+  manual-review queue.
+- `find_duplicate_foods` - List near-duplicate food-name pairs (read-only).
+- `merge_foods` - Merge a duplicate food into the canonical one via Mealie's
+  native `/api/foods/merge` (dry-run by default).
+
+See [`docs/INGREDIENT_CLEANUP.md`](docs/INGREDIENT_CLEANUP.md) for how lines are
+classified and when a fix is auto-applied vs. held for review. A batch CLI is
+available for clearing an import backlog:
+
+```bash
+uv run python -m src.cleanup_cli --dry-run          # preview the whole library
+uv run python -m src.cleanup_cli --apply            # write the auto fixes
+uv run python -m src.cleanup_cli --dupes            # list duplicate foods
+```
+
 ### Unit Tools (5 operations)
 - `get_units` - List/search units
 - `create_unit` - Create a new unit
@@ -198,7 +220,7 @@ Restart Claude Desktop to load the server.
 - `create_mealplan_bulk` - Create multiple entries
 - `get_todays_mealplan` - Get today's meals
 
-**Total: 62 tools** providing comprehensive Mealie API coverage
+**Total: 66 tools** providing comprehensive Mealie API coverage
 
 ## 🔧 Development
 

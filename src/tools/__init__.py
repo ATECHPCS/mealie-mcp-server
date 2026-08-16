@@ -1,4 +1,5 @@
 from .categories_tools import register_categories_tools
+from .cleanup_tools import register_cleanup_tools
 from .foods_tools import register_foods_tools
 from .mealplan_tools import register_mealplan_tools
 from .recipe_tools import register_recipe_tools
@@ -20,6 +21,7 @@ def register_all_tools(mcp, mealie):
     register_shopping_list_tools(mcp, mealie)
     register_mealplan_tools(mcp, mealie)
     register_image_gen_tools(mcp, mealie)
+    register_cleanup_tools(mcp, mealie)
 
 
 __all__ = [
@@ -33,4 +35,5 @@ __all__ = [
     "register_shopping_list_tools",
     "register_mealplan_tools",
     "register_image_gen_tools",
+    "register_cleanup_tools",
 ]

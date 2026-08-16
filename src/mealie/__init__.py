@@ -1,4 +1,5 @@
 from .categories import CategoriesMixin
+from .cleanup import CleanupMixin
 from .client import MealieClient
 from .foods import FoodsMixin
 from .group import GroupMixin
@@ -13,6 +14,7 @@ from .user import UserMixin
 
 
 class MealieFetcher(
+    CleanupMixin,
     RecipeMixin,
     CategoriesMixin,
     TagsMixin,

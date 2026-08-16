@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from dotenv import load_dotenv  # noqa: E402
 
 from mealie import MealieFetcher  # noqa: E402
+from mealie.cleanup import held_lines  # noqa: E402
 from mealie.food_dedupe import suggest_duplicate_clusters  # noqa: E402
 
 
@@ -76,9 +77,8 @@ def _run_cleanup(m: MealieFetcher, args: argparse.Namespace) -> None:
         touched += 1
         for k in totals:
             totals[k] += plan["counts"].get(k, 0)
-        for ln in plan["lines"]:
-            if ln["disposition"] in ("review", "recipe_ref"):
-                review_lines.append((slug, ln["disposition"], ln["raw"]))
+        for ln in held_lines(plan, dry_run=not args.apply, apply_reviews=args.apply_reviews):
+            review_lines.append((slug, ln["disposition"], ln["raw"]))
 
         if args.apply:
             res = m.apply_recipe_cleanup(

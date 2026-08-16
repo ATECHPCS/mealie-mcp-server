@@ -17,6 +17,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
 from mealie import MealieFetcher
+from mealie.cleanup import held_lines
 from mealie.food_dedupe import suggest_duplicate_clusters
 
 logger = logging.getLogger("mealie-mcp")
@@ -123,12 +124,13 @@ def register_cleanup_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                     continue
                 for k in totals:
                     totals[k] += plan["counts"].get(k, 0)
-                for ln in plan["lines"]:
-                    if ln["disposition"] in ("review", "recipe_ref"):
-                        review_queue.append(
-                            {"slug": slug, "raw": ln["raw"],
-                             "disposition": ln["disposition"], "reason": ln["reason"]}
-                        )
+                # report only lines that will actually remain for a human after
+                # this apply (an opted-in review run clears the applied ones)
+                for ln in held_lines(plan, dry_run=dry_run, apply_reviews=apply_reviews):
+                    review_queue.append(
+                        {"slug": slug, "raw": ln["raw"],
+                         "disposition": ln["disposition"], "reason": ln["reason"]}
+                    )
                 applied = 0
                 if not dry_run:
                     res = mealie.apply_recipe_cleanup(

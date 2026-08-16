@@ -81,6 +81,37 @@ def test_identical_name_is_not_a_duplicate_of_itself():
     assert find_duplicate("olive oil", catalog) is None
 
 
+def test_suggest_blocked_matches_naive_exactly():
+    # the prefilters must not change results — compare against a brute-force
+    # reference over a varied word list
+    import difflib
+
+    from mealie.food_dedupe import _is_kept_distinct, norm
+
+    words = [
+        "canned pear", "canned pea", "canned peach", "oat milk", "goat milk",
+        "chicken breast", "chicken thighs", "chicken roast", "olive oil",
+        "olive oyl", "red bell pepper", "green bell pepper", "bell pepper",
+        "sugar", "sugars", "brown sugar", "raw sugar", "octopus", "octopuse",
+        "water", "hot water", "sparkling water", "flour", "rice flour",
+        "almond flour", "almond milk", "almond meal", "kosher salt", "sea salt",
+        "table salt", "smoked paprika", "sweet paprika", "paprika",
+    ]
+    for cutoff in (0.82, 0.86, 0.9):
+        key_to_name = {}
+        for n in words:
+            key_to_name.setdefault(norm(n), n)
+        keys = list(key_to_name)
+        naive = set()
+        for i, ka in enumerate(keys):
+            for kb in keys[i + 1:]:
+                s = difflib.SequenceMatcher(None, ka, kb).ratio()
+                if s >= cutoff and not _is_kept_distinct(key_to_name[ka], key_to_name[kb]):
+                    naive.add(frozenset({key_to_name[ka], key_to_name[kb]}))
+        blocked = {frozenset({a, b}) for a, b, _ in suggest_duplicate_clusters(words, cutoff=cutoff)}
+        assert blocked == naive, f"mismatch at cutoff {cutoff}: {blocked ^ naive}"
+
+
 def test_suggest_surfaces_near_dupes_but_not_kept_distinct():
     catalog = [
         "plain Greek yogurt",

@@ -16,6 +16,7 @@ from mealie.cleanup import (  # noqa: E402
     SECTION,
     apply_plan,
     build_plan,
+    held_lines,
 )
 
 
@@ -272,6 +273,29 @@ def test_apply_reuses_parser_unit_id():
 
     apply_plan(raw, plan, lambda n, i: {"id": i or "f", "name": n}, ensure_unit)
     assert seen["unit_id"] == "unit-cup-1"  # existing unit reused, not recreated
+
+
+def test_held_lines_reflects_apply_reviews():
+    # an alternative (review, structurally valid) + a recipe_ref
+    raw = [
+        _ing("2 cups baby arugula or baby greens"),
+        _ing("12 slices Keto Brioche Bread Recipe"),
+    ]
+    plan = build_plan(raw, make_parser({}), food_names=[])
+    # dry run / no apply_reviews: both are still held
+    assert len(held_lines(plan, dry_run=True, apply_reviews=False)) == 2
+    # applying reviews clears the alternative, leaving only the recipe_ref
+    remaining = held_lines(plan, dry_run=False, apply_reviews=True)
+    assert [ln["disposition"] for ln in remaining] == [RECIPE_REF]
+
+
+def test_held_lines_keeps_unfixable_review():
+    # a low-confidence line with no matched food stays held even with reviews on
+    raw = [_ing("mystery prose line with no food")]
+    table = {"mystery prose line with no food": _parsed("x", food=None, conf=0.2)}
+    plan = build_plan(raw, make_parser(table), food_names=[])
+    remaining = held_lines(plan, dry_run=False, apply_reviews=True)
+    assert len(remaining) == 1  # nothing structurally valid to apply
 
 
 def test_apply_section_sets_title_and_clears_food():

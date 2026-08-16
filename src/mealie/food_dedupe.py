@@ -181,27 +181,49 @@ def suggest_duplicate_clusters(
 
     Returns a de-duplicated, sorted list of (name_a, name_b, score) with
     KEEP_DISTINCT pairs suppressed. Read-only — merges nothing.
-    """
-    keys = [norm(n) for n in catalog_names]
-    key_to_name: Dict[str, str] = {}
-    for n, k in zip(catalog_names, keys):
-        key_to_name.setdefault(k, n)
-    unique_keys = list(key_to_name)
 
-    seen: set = set()
+    A naive all-pairs `SequenceMatcher` is O(n^2) and takes minutes on a
+    multi-thousand-food catalog (past the MCP tool timeout). Two exact
+    prefilters cut the work without changing the result — both are necessary
+    conditions for `ratio() >= cutoff`, so nothing that would have matched is
+    skipped:
+
+      * length window — `ratio = 2*M/(la+lb)` with `M <= min(la, lb)`, so a
+        match needs `lb <= la*(2-cutoff)/cutoff`. Keys are sorted by length, so
+        once `lb` exceeds that bound we can stop scanning outward.
+      * character-multiset overlap — `M` (ordered matches) can't exceed the
+        shared character count, so `2*common/(la+lb) < cutoff` rules a pair out
+        before the expensive ratio() call.
+    """
+    key_to_name: Dict[str, str] = {}
+    for n in catalog_names:
+        key_to_name.setdefault(norm(n), n)
+
+    from collections import Counter
+
+    entries = sorted(
+        ((k, len(k), Counter(k)) for k in key_to_name),
+        key=lambda e: e[1],
+    )
+    span = (2 - cutoff) / cutoff  # max allowed lb/la ratio
+
     out: List[Tuple[str, str, float]] = []
-    for i, ka in enumerate(unique_keys):
-        for kb in unique_keys[i + 1:]:
+    for i, (ka, la, ca) in enumerate(entries):
+        if la == 0:
+            continue
+        max_lb = la * span
+        for kb, lb, cb in entries[i + 1:]:
+            if lb > max_lb:
+                break  # sorted by length — every later kb is only longer
+            common = sum((ca & cb).values())
+            if 2 * common < cutoff * (la + lb):
+                continue  # can't reach cutoff even with a perfect ordered match
             score = difflib.SequenceMatcher(None, ka, kb).ratio()
             if score < cutoff:
                 continue
             na, nb = key_to_name[ka], key_to_name[kb]
             if _is_kept_distinct(na, nb):
                 continue
-            pair = frozenset({ka, kb})
-            if pair in seen:
-                continue
-            seen.add(pair)
             out.append((na, nb, round(score, 3)))
     out.sort(key=lambda t: t[2], reverse=True)
     return out

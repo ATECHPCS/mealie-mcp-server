@@ -123,22 +123,32 @@ def _clean_ingredients_after_save(
 ) -> Dict[str, Any]:
     """Structure a freshly saved/scraped recipe's ingredients.
 
-    When MEALIE_IMPORT_AUTO_CLEANUP is on (default), run the full ingredient
-    cleanup — splitting compounds/distributions, resolving "X or Y"
-    alternatives, promoting section headers, stripping measure noise, and
-    deduping foods — so downstream consumers (notably the Grocy importer) never
-    see raw "salt and pepper"/"sirloin or flank steak" notes. This subsumes the
-    basic NLP pass. It is fail-safe: any error falls back to the plain parse so
-    an import never breaks on cleanup.
+    When MEALIE_IMPORT_AUTO_CLEANUP is on (default), run the ingredient cleanup —
+    splitting "salt and pepper" compounds and "1 tsp each A,B,C" distributions,
+    stripping measure noise, promoting section headers, and deduping foods — so
+    downstream consumers (notably the Grocy importer) don't see those raw notes.
+    This subsumes the basic NLP pass.
 
-    Set MEALIE_IMPORT_CLEANUP_REVIEWS=false to keep only the deterministic
-    (auto) fixes and leave "X or Y" alternatives as notes for manual review.
+    By default only the deterministic (auto) fixes are applied; genuinely
+    ambiguous lines ("X or Y" alternatives, low-confidence parses,
+    food-in-parenthetical, instruction-referenced expansions) are LEFT as notes
+    rather than auto-resolved — applying those unattended can mint a wrong food
+    or orphan a step link. Set MEALIE_IMPORT_CLEANUP_REVIEWS=true to also apply
+    the best-guess review fixes (keep-first for alternatives).
+
+    Fail-safe by construction: any failure falls back to the basic parse, and if
+    that fails too the original recipe is returned — an import never raises here.
     """
     if not _env_flag("MEALIE_IMPORT_AUTO_CLEANUP", True):
-        return _parse_scraped_ingredients(mealie, slug, recipe)
+        try:
+            return _parse_scraped_ingredients(mealie, slug, recipe)
+        except Exception:  # noqa: BLE001
+            logger.warning({"message": "basic parse failed on import", "slug": slug,
+                            "traceback": traceback.format_exc()})
+            return recipe
     try:
         mealie.apply_recipe_cleanup(
-            slug, apply_reviews=_env_flag("MEALIE_IMPORT_CLEANUP_REVIEWS", True)
+            slug, apply_reviews=_env_flag("MEALIE_IMPORT_CLEANUP_REVIEWS", False)
         )
         return mealie.get_recipe(slug)
     except Exception:  # noqa: BLE001 — cleanup must never break an import
@@ -146,7 +156,15 @@ def _clean_ingredients_after_save(
             {"message": "auto-cleanup failed; falling back to basic parse", "slug": slug,
              "traceback": traceback.format_exc()}
         )
+    try:
         return _parse_scraped_ingredients(mealie, slug, mealie.get_recipe(slug))
+    except Exception:  # noqa: BLE001 — last resort: return what we have
+        logger.warning({"message": "basic-parse fallback also failed", "slug": slug,
+                        "traceback": traceback.format_exc()})
+        try:
+            return mealie.get_recipe(slug)
+        except Exception:  # noqa: BLE001
+            return recipe
 
 
 def _build_instruction(
@@ -405,13 +423,13 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         requested.
 
         Mealie's scraper stores ingredients as unparsed text; this tool runs the
-        full ingredient cleanup (structured quantity/unit/food, plus splitting
-        "salt and pepper" compounds, resolving "X or Y" alternatives, promoting
-        section headers, and deduping foods) and saves the result before
-        returning — so downstream consumers (e.g. the Grocy importer) get clean
-        data. Toggle with MEALIE_IMPORT_AUTO_CLEANUP (default on) and
-        MEALIE_IMPORT_CLEANUP_REVIEWS (default on; off keeps only the
-        deterministic fixes and leaves alternatives as notes).
+        ingredient cleanup (structured quantity/unit/food, plus splitting
+        "salt and pepper" compounds, promoting section headers, and deduping
+        foods) and saves the result before returning — so downstream consumers
+        (e.g. the Grocy importer) get clean data. Toggle with
+        MEALIE_IMPORT_AUTO_CLEANUP (default on). By default only deterministic
+        fixes apply; set MEALIE_IMPORT_CLEANUP_REVIEWS=true to also auto-resolve
+        ambiguous "X or Y" alternatives (keep-first).
 
         Args:
             url: Source URL of the recipe to import.

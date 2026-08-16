@@ -50,20 +50,22 @@ def test_env_flag_defaults_and_parsing(monkeypatch):
     assert rt._env_flag("MEALIE_IMPORT_AUTO_CLEANUP", False) is True
 
 
-def test_cleanup_runs_by_default_with_reviews(monkeypatch):
+def test_cleanup_runs_by_default_without_reviews(monkeypatch):
+    # default is deterministic-only (apply_reviews False) — ambiguous lines are
+    # held, not auto-resolved, on unattended import
     _clear_env(monkeypatch)
     m = _StubMealie()
     rt._clean_ingredients_after_save(m, "r", {"recipeIngredient": []})
-    assert m.cleanup_calls == [{"slug": "r", "apply_reviews": True}]
+    assert m.cleanup_calls == [{"slug": "r", "apply_reviews": False}]
     assert m.basic_parse == 0  # cleanup subsumes the basic parse
 
 
-def test_reviews_toggle_off(monkeypatch):
+def test_reviews_toggle_on(monkeypatch):
     _clear_env(monkeypatch)
-    monkeypatch.setenv("MEALIE_IMPORT_CLEANUP_REVIEWS", "false")
+    monkeypatch.setenv("MEALIE_IMPORT_CLEANUP_REVIEWS", "true")
     m = _StubMealie()
     rt._clean_ingredients_after_save(m, "r", {"recipeIngredient": []})
-    assert m.cleanup_calls[0]["apply_reviews"] is False
+    assert m.cleanup_calls[0]["apply_reviews"] is True
 
 
 def test_disabled_falls_back_to_basic_parse(monkeypatch):
@@ -81,3 +83,22 @@ def test_cleanup_error_is_fail_safe(monkeypatch):
     out = rt._clean_ingredients_after_save(m, "r", {"recipeIngredient": []})
     assert out == m._recipe
     assert len(m.cleanup_calls) == 1  # attempted, then fell back
+
+
+def test_double_failure_returns_original_recipe(monkeypatch):
+    # cleanup fails AND the basic-parse fallback fails -> still no raise
+    _clear_env(monkeypatch)
+    original = {"recipeIngredient": [], "slug": "orig"}
+
+    class _Broken(_StubMealie):
+        def __init__(self):
+            super().__init__(cleanup_raises=True)
+
+        def parse_ingredients(self, notes):
+            raise RuntimeError("parser down too")
+
+        def get_recipe(self, slug):
+            raise RuntimeError("mealie unreachable")
+
+    out = rt._clean_ingredients_after_save(_Broken(), "r", original)
+    assert out is original  # last-resort fallback is the recipe we were given

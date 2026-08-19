@@ -24,6 +24,16 @@ class CronometerError(RuntimeError):
     pass
 
 
+def _sanitize(detail: Any) -> str:
+    """A short, safe error string — never a raw bridge/food payload.
+
+    Bridge responses can carry user/food data; the repo rule forbids logging it,
+    and these messages flow into logs. Keep only a bounded, single-line summary.
+    """
+    s = " ".join(str(detail).split())
+    return s[:120] if s else "unknown error"
+
+
 class Cronometer:
     def __init__(self, url: str, token: str, timeout: float = 60.0) -> None:
         if not url:
@@ -84,13 +94,35 @@ class Cronometer:
 
     @staticmethod
     def _payload(resp: httpx.Response) -> dict:
-        for raw in resp.text.splitlines():
-            line = raw[6:].strip() if raw.startswith("data: ") else raw.strip()
-            if line.startswith("{"):
-                msg = json.loads(line)
+        # Accept plain JSON and SSE ("data:" with or without a space). Try each
+        # standalone JSON line first, then the assembled SSE data, then the whole
+        # body (pretty-printed JSON).
+        def _try(text: str):
+            text = text.strip()
+            if text.startswith("{"):
+                try:
+                    msg = json.loads(text)
+                except json.JSONDecodeError:
+                    return None
                 if "result" in msg or "error" in msg:
                     return msg
-        raise CronometerError(f"malformed bridge response: {resp.text[:200]}")
+            return None
+
+        data_parts = []
+        for raw in resp.text.splitlines():
+            line = raw.strip()
+            if line.startswith("data:"):
+                data_parts.append(line[5:].lstrip())
+                continue
+            hit = _try(line)
+            if hit is not None:
+                return hit
+        for candidate in ("".join(data_parts), resp.text):
+            hit = _try(candidate)
+            if hit is not None:
+                return hit
+        # don't echo the body — it may carry user/food data (repo logging rule)
+        raise CronometerError(f"malformed bridge response (HTTP {resp.status_code})")
 
     def call(self, tool: str, args: dict) -> Any:
         self._start()
@@ -105,8 +137,12 @@ class Cronometer:
             )
         )
         if "error" in msg:
-            raise CronometerError(f"{tool}: {msg['error']}")
+            raise CronometerError(f"{tool}: {_sanitize(msg['error'])}")
         result = msg["result"]
+        # MCP tools report execution failures via isError on the result, not the
+        # JSON-RPC error field — treat that as a hard failure.
+        if isinstance(result, dict) and result.get("isError"):
+            raise CronometerError(f"{tool}: bridge returned an error result")
         data = result.get("structuredContent") or {}
         if not data:
             for c in result.get("content", []):
@@ -119,9 +155,11 @@ class Cronometer:
             try:
                 data = json.loads(inner)
             except json.JSONDecodeError:
-                raise CronometerError(f"{tool}: {inner[:200]}") from None
+                raise CronometerError(f"{tool}: unparseable payload") from None
         if isinstance(data, dict) and data.get("status") not in (None, "success"):
-            raise CronometerError(f"{tool}: {json.dumps(data)[:200]}")
+            # surface only the status/error string, never the whole payload
+            detail = _sanitize(data.get("error") or data.get("message") or data.get("status"))
+            raise CronometerError(f"{tool}: {detail}")
         return data
 
     # ---- the three operations we need ----
@@ -143,22 +181,22 @@ class Cronometer:
             },
         )
         if not res.get("food_id") or not res.get("measure_id"):
-            raise CronometerError(f"add_custom_food returned no ids: {json.dumps(res)[:200]}")
+            raise CronometerError("add_custom_food returned no ids")
         return {"food_id": int(res["food_id"]), "measure_id": int(res["measure_id"])}
 
     def find_custom_food(self, name: str) -> dict | None:
         """Find an existing *custom* food by exact name, or None.
 
-        Recovery path: the recipe -> food mapping lives in grocy-cook's data
-        volume, so without this a lost volume would create a duplicate custom
-        food for every recipe (Cronometer has no delete-food API). Only
-        source="Custom" hits count — a curated database entry with a similar
-        name would carry different macros.
+        Without this a lost mapping would create a duplicate custom food for
+        every recipe (Cronometer has no delete-food API). Only source="Custom"
+        hits count — a curated database entry with a similar name would carry
+        different macros.
+
+        Raises CronometerError on a bridge failure. Returning None here means a
+        confirmed no-match, NOT "the search failed" — a swallowed error would
+        make the caller create a duplicate food on every transient outage.
         """
-        try:
-            res = self.call("search_foods", {"query": name[:200]})
-        except CronometerError:
-            return None
+        res = self.call("search_foods", {"query": name[:200]})
         target = name.strip().lower()
         for f in res.get("foods") or []:
             if (
@@ -177,7 +215,7 @@ class Cronometer:
         grams: float,
         date: str | None = None,
         diary_group: str | None = None,
-    ) -> str | None:
+    ) -> str:
         args: dict[str, Any] = {
             "food_id": int(food_id),
             "measure_id": int(measure_id),
@@ -190,7 +228,11 @@ class Cronometer:
         res = self.call("add_food_entry", args)
         entry = res.get("entry") or {}
         eid = entry.get("id")
-        return str(eid) if eid is not None else None
+        if eid is None:
+            # a "success" status with no entry id is not a real log — never let
+            # the caller report success on it.
+            raise CronometerError("add_food_entry returned no entry id")
+        return str(eid)
 
     def remove_food_entry(self, entry_id: str) -> None:
         self.call("remove_food_entry", {"entry_ids": [str(entry_id)]})

@@ -17,15 +17,29 @@ per-serving macros, so Cronometer's linear-by-grams scaling means N servings
 is logged as N * SERVING_GRAMS grams. SERVING_GRAMS is only a unit of account.
 """
 
+import hashlib
 import logging
+import math
 import os
 import re
+import threading
 from typing import Any, Dict, Optional
 
 from mcp.server.fastmcp import FastMCP
 
 from cronometer import Cronometer, CronometerError
 from mealie import MealieFetcher
+
+
+class RecipeAmbiguousError(ValueError):
+    """More than one recipe matches the given name; caller must use a slug."""
+
+
+# One recipe with a given macro set maps to exactly one Cronometer custom food.
+# find-then-create is not atomic across the bridge's per-call sessions, so
+# serialize it in-process to avoid two concurrent logs each creating a food.
+# (This does not protect multiple server replicas — there is only one here.)
+_CREATE_LOCK = threading.Lock()
 
 logger = logging.getLogger("mealie-mcp")
 
@@ -46,13 +60,55 @@ _MACRO_KEYS = {
 # the four Cronometer's add_custom_food requires
 _REQUIRED = ("calories", "protein_g", "fat_g", "carbs_g")
 
+# valid Cronometer diary groups (matches the cronometer-logger skill)
+_MEAL_GROUPS = frozenset({"breakfast", "lunch", "dinner", "snacks"})
+
+
+# thousands-grouped ("1,234.5") first, else a plain/decimal/exponent number.
+_NUM_RE = re.compile(
+    r"[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?"
+)
+
 
 def _number(raw: object) -> Optional[float]:
-    """Mealie stores nutrition as strings, sometimes with units ("54 g")."""
+    """Parse a Mealie nutrition value (bare or unit-suffixed string) to a float.
+
+    Handles thousands separators ("1,234"), leading decimals (".5"), and
+    exponents ("1e3"); rejects negative and non-finite values (invalid macros).
+    Note: Mealie's own units are fixed per field (g for macros, mg for sodium),
+    so we do NOT unit-convert — a value is taken as already in the target unit.
+    """
     if raw is None:
         return None
-    m = re.search(r"\d+(?:\.\d+)?", str(raw))
-    return float(m.group()) if m else None
+    if isinstance(raw, bool):  # bool is an int subclass; never a nutrition value
+        return None
+    if isinstance(raw, (int, float)):
+        v = float(raw)
+    else:
+        m = _NUM_RE.search(str(raw))
+        if not m:
+            return None
+        try:
+            v = float(m.group().replace(",", ""))
+        except ValueError:
+            return None
+    if not math.isfinite(v) or v < 0:
+        return None
+    return v
+
+
+def _macro_fingerprint(macros: Dict[str, float]) -> str:
+    """Short stable hash of the macro set.
+
+    Baked into the custom-food name so that editing a recipe's nutrition in
+    Mealie yields a NEW food instead of silently reusing the old one's macros
+    (Cronometer can't update a custom food). Same recipe + same macros → same
+    name → reused; changed macros → new name → new food.
+    """
+    parts = "|".join(
+        f"{k}={round(float(macros.get(k, 0.0)), 3)}" for k in sorted(_MACRO_KEYS.values())
+    )
+    return hashlib.sha1(parts.encode("utf-8")).hexdigest()[:6]
 
 
 def extract_macros(nutrition: Dict[str, Any]) -> Optional[Dict[str, float]]:
@@ -72,34 +128,34 @@ def extract_macros(nutrition: Dict[str, Any]) -> Optional[Dict[str, float]]:
 
 
 def resolve_recipe(mealie: MealieFetcher, ref: str) -> Optional[Dict[str, Any]]:
-    """Load a full recipe by slug or by (case-insensitive) name, or None.
+    """Load a full recipe by slug or by EXACT (case-insensitive) name, or None.
 
-    Search list items don't carry nutrition, so a name match is re-fetched by
-    slug to get the full record.
+    Never falls back to a fuzzy/first search hit — "chili" must not silently log
+    "White Chicken Chili". Raises RecipeAmbiguousError when several recipes share
+    the exact name (caller must pass a slug). Returns None only for a genuine
+    no-match. Search list items don't carry nutrition, so a name match is
+    re-fetched by slug to get the full record.
     """
     ref = (ref or "").strip()
     if not ref:
         return None
+    # exact slug hit (get_recipe is by slug; a non-slug name 404s -> fall through)
     try:
         return mealie.get_recipe(ref)
     except Exception:
         pass
-    try:
-        listing = mealie.get_recipes(search=ref, per_page=5)
-    except Exception:
-        return None
+    listing = mealie.get_recipes(search=ref, per_page=50)  # wide enough for exact hits
     items = (listing or {}).get("items") or []
-    if not items:
-        return None
     want = ref.lower()
-    match = next((i for i in items if str(i.get("name", "")).strip().lower() == want), items[0])
-    slug = match.get("slug")
-    if not slug:
+    exact = [i for i in items if str(i.get("name", "")).strip().lower() == want and i.get("slug")]
+    if not exact:
         return None
-    try:
-        return mealie.get_recipe(slug)
-    except Exception:
-        return None
+    if len(exact) > 1:
+        raise RecipeAmbiguousError(
+            f"{len(exact)} recipes are named {ref!r}; pass the exact slug instead "
+            "(" + ", ".join(str(i.get("slug")) for i in exact[:5]) + ")."
+        )
+    return mealie.get_recipe(exact[0]["slug"])
 
 
 def log_recipe_core(
@@ -112,14 +168,35 @@ def log_recipe_core(
 ) -> Dict[str, Any]:
     """Resolve a recipe, ensure a Cronometer food exists, and log servings.
 
-    Returns a structured result dict, or {"error": ...} on any expected
-    failure (recipe not found, no nutrition, bridge error). Never raises for
-    those; the caller surfaces the message.
+    Returns a structured result dict, or {"error": ...} for expected input
+    failures (bad servings, recipe not found, ambiguous name, no nutrition).
+    Bridge failures raise CronometerError; the MCP wrapper maps those to an
+    {"error": ...} response.
     """
-    if servings <= 0:
-        return {"error": "servings must be greater than 0"}
+    try:
+        servings = float(servings)
+    except (TypeError, ValueError):
+        return {"error": "servings must be a number"}
+    if not math.isfinite(servings) or servings <= 0:
+        return {"error": "servings must be a positive, finite number"}
 
-    full = resolve_recipe(mealie, recipe)
+    if meal_group is not None:
+        meal_group = str(meal_group).strip().lower() or None
+        if meal_group and meal_group not in _MEAL_GROUPS:
+            return {
+                "error": f"meal_group must be one of {', '.join(sorted(_MEAL_GROUPS))} (or omitted)."
+            }
+
+    grams = round(servings * SERVING_GRAMS, 2)
+    if grams <= 0:
+        return {"error": "servings too small to log (rounds to 0 g)"}
+    # report from the quantity actually sent, not the raw servings
+    effective_servings = grams / SERVING_GRAMS
+
+    try:
+        full = resolve_recipe(mealie, recipe)
+    except RecipeAmbiguousError as e:
+        return {"error": str(e), "ambiguous": True}
     if not full:
         return {"error": f"No Mealie recipe found for {recipe!r}."}
 
@@ -137,15 +214,17 @@ def log_recipe_core(
             "needs_nutrition": True,
         }
 
-    # Reuse this recipe's custom food if one already exists (Cronometer has no
-    # update/delete for custom foods, so a duplicate would accumulate forever).
-    reused = True
-    food = cron.find_custom_food(name)
-    if not food:
-        reused = False
-        food = cron.add_custom_food(name, macros, SERVING_GRAMS)
+    # The custom food name carries a macro fingerprint, so a recipe whose
+    # nutrition changed maps to a NEW food instead of reusing stale macros
+    # (Cronometer can't update a custom food). find-then-create is serialized
+    # to keep two concurrent logs from both creating the same food.
+    food_name = f"{name} [{_macro_fingerprint(macros)}]"
+    with _CREATE_LOCK:
+        food = cron.find_custom_food(food_name)
+        reused = food is not None
+        if not food:
+            food = cron.add_custom_food(food_name, macros, SERVING_GRAMS)
 
-    grams = round(float(servings) * SERVING_GRAMS, 2)
     entry_id = cron.add_food_entry(
         food["food_id"], food["measure_id"], grams, date=date, diary_group=meal_group
     )
@@ -154,7 +233,7 @@ def log_recipe_core(
         "ok": True,
         "recipe": name,
         "slug": full.get("slug"),
-        "servings": float(servings),
+        "servings": effective_servings,
         "grams_logged": grams,
         "date": date or "today",
         "meal_group": meal_group,
@@ -162,7 +241,7 @@ def log_recipe_core(
         "measure_id": food["measure_id"],
         "custom_food": "reused" if reused else "created",
         "entry_id": entry_id,
-        "calories_logged": round(macros["calories"] * float(servings), 1),
+        "calories_logged": round(macros["calories"] * effective_servings, 1),
         "macros_per_serving": macros,
     }
 

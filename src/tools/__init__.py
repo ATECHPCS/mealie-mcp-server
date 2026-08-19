@@ -8,6 +8,7 @@ from .tags_tools import register_tags_tools
 from .tools_tools import register_tools_tools
 from .units_tools import register_units_tools
 from .image_gen_tools import register_image_gen_tools
+from .cronometer_tools import register_cronometer_tools
 
 
 def register_all_tools(mcp, mealie):
@@ -22,6 +23,7 @@ def register_all_tools(mcp, mealie):
     register_mealplan_tools(mcp, mealie)
     register_image_gen_tools(mcp, mealie)
     register_cleanup_tools(mcp, mealie)
+    register_cronometer_tools(mcp, mealie)
 
 
 __all__ = [
@@ -36,4 +38,5 @@ __all__ = [
     "register_mealplan_tools",
     "register_image_gen_tools",
     "register_cleanup_tools",
+    "register_cronometer_tools",
 ]

@@ -22,3 +22,7 @@ services:
       OPENAI_IMAGE_MODEL: gpt-image-1
       MCP_AUTH: api_key
       MCP_API_KEYS: ${MEALIE_MCP2_INBOUND_KEY}
+      # Cronometer bridge, for log_recipe_to_cronometer. Same host, holds the
+      # Cronometer credentials. Leave unset to disable the tool gracefully.
+      CRONOMETER_MCP_URL: http://10.10.0.156:8766/mcp
+      CRONOMETER_MCP_TOKEN: ${CRONOMETER_MCP_TOKEN}

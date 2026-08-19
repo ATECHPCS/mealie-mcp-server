@@ -228,11 +228,11 @@ class Cronometer:
         res = self.call("add_food_entry", args)
         entry = res.get("entry") or {}
         eid = entry.get("id")
-        if eid is None:
-            # a "success" status with no entry id is not a real log — never let
-            # the caller report success on it.
+        # a "success" status with no usable entry id is not a real log — never
+        # let the caller report success on it (reject None, "", whitespace).
+        if eid is None or not str(eid).strip():
             raise CronometerError("add_food_entry returned no entry id")
-        return str(eid)
+        return str(eid).strip()
 
     def remove_food_entry(self, entry_id: str) -> None:
         self.call("remove_food_entry", {"entry_ids": [str(entry_id)]})

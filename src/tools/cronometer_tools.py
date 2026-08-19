@@ -64,37 +64,50 @@ _REQUIRED = ("calories", "protein_g", "fat_g", "carbs_g")
 _MEAL_GROUPS = frozenset({"breakfast", "lunch", "dinner", "snacks"})
 
 
-# thousands-grouped ("1,234.5") first, else a plain/decimal/exponent number.
-_NUM_RE = re.compile(
-    r"[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?"
+# the WHOLE string must be a number (optionally thousands-grouped, decimal, or
+# exponent) followed by an optional unit — so "12abc34", "1.2.3", "1,23 g" fail
+# closed instead of yielding a misleading prefix.
+_NUM_FULL = re.compile(
+    r"\s*(?P<num>[-+]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d*\.?\d+)(?:[eE][-+]?\d+)?)"
+    r"\s*[A-Za-zµ%°]*\s*"
 )
 
 
 def _number(raw: object) -> Optional[float]:
-    """Parse a Mealie nutrition value (bare or unit-suffixed string) to a float.
+    """Parse a Mealie nutrition value to a float, or None if malformed.
 
-    Handles thousands separators ("1,234"), leading decimals (".5"), and
-    exponents ("1e3"); rejects negative and non-finite values (invalid macros).
-    Note: Mealie's own units are fixed per field (g for macros, mg for sodium),
-    so we do NOT unit-convert — a value is taken as already in the target unit.
+    Accepts a bare or unit-suffixed number only if the ENTIRE value is one:
+    thousands separators ("1,234"), leading decimals (".5"), exponents ("1e3").
+    Rejects negative, non-finite, and partially-numeric junk ("1.2.3", "12abc").
+    Mealie's units are fixed per field (g for macros, mg for sodium), so we do
+    NOT unit-convert — the value is taken as already in the target unit.
     """
-    if raw is None:
-        return None
-    if isinstance(raw, bool):  # bool is an int subclass; never a nutrition value
+    if raw is None or isinstance(raw, bool):  # bool is an int subclass
         return None
     if isinstance(raw, (int, float)):
         v = float(raw)
     else:
-        m = _NUM_RE.search(str(raw))
+        m = _NUM_FULL.fullmatch(str(raw))
         if not m:
             return None
         try:
-            v = float(m.group().replace(",", ""))
+            v = float(m.group("num").replace(",", ""))
         except ValueError:
             return None
     if not math.isfinite(v) or v < 0:
         return None
     return v
+
+
+# Cronometer caps custom-food names at 200 chars; keep the whole "<name> [fp]"
+# under that so the create name and the search/reuse name are identical (an
+# out-of-sync truncation would create a fresh duplicate food on every log).
+_MAX_FOOD_NAME = 200
+
+
+def _food_name(name: str, fingerprint: str) -> str:
+    suffix = f" [{fingerprint}]"
+    return name[: _MAX_FOOD_NAME - len(suffix)].rstrip() + suffix
 
 
 def _macro_fingerprint(macros: Dict[str, float]) -> str:
@@ -144,7 +157,7 @@ def resolve_recipe(mealie: MealieFetcher, ref: str) -> Optional[Dict[str, Any]]:
         return mealie.get_recipe(ref)
     except Exception:
         pass
-    listing = mealie.get_recipes(search=ref, per_page=50)  # wide enough for exact hits
+    listing = mealie.get_recipes(search=ref, per_page=-1)  # all hits (-1 = no paging)
     items = (listing or {}).get("items") or []
     want = ref.lower()
     exact = [i for i in items if str(i.get("name", "")).strip().lower() == want and i.get("slug")]
@@ -188,8 +201,8 @@ def log_recipe_core(
             }
 
     grams = round(servings * SERVING_GRAMS, 2)
-    if grams <= 0:
-        return {"error": "servings too small to log (rounds to 0 g)"}
+    if not math.isfinite(grams) or grams <= 0:
+        return {"error": "servings out of range (must round to a positive gram amount)"}
     # report from the quantity actually sent, not the raw servings
     effective_servings = grams / SERVING_GRAMS
 
@@ -218,7 +231,7 @@ def log_recipe_core(
     # nutrition changed maps to a NEW food instead of reusing stale macros
     # (Cronometer can't update a custom food). find-then-create is serialized
     # to keep two concurrent logs from both creating the same food.
-    food_name = f"{name} [{_macro_fingerprint(macros)}]"
+    food_name = _food_name(name, _macro_fingerprint(macros))
     with _CREATE_LOCK:
         food = cron.find_custom_food(food_name)
         reused = food is not None
@@ -228,6 +241,8 @@ def log_recipe_core(
     entry_id = cron.add_food_entry(
         food["food_id"], food["measure_id"], grams, date=date, diary_group=meal_group
     )
+    if not entry_id:  # defensive: add_food_entry already raises, never report a blank log
+        return {"error": "Cronometer did not return a diary entry id"}
 
     return {
         "ok": True,
@@ -292,12 +307,15 @@ def register_cronometer_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
             cron = _build_client()
         except CronometerError as e:
             return {"error": str(e)}
+        # NB: error details are returned to the caller but NOT logged — the repo
+        # rule forbids logging response/user/food data, which bridge messages and
+        # tracebacks can contain. Log only a category + exception type name.
         try:
             with cron:
                 return log_recipe_core(mealie, cron, recipe, servings, date, meal_group)
         except CronometerError as e:
-            logger.error({"message": "Cronometer log failed", "error": str(e)})
+            logger.error({"message": "Cronometer log failed", "error_type": "CronometerError"})
             return {"error": f"Cronometer bridge error: {e}"}
         except Exception as e:  # noqa: BLE001 - surface unexpected failures to the caller
-            logger.exception("Unexpected error logging recipe to Cronometer")
-            return {"error": f"Unexpected error: {e}"}
+            logger.error({"message": "Cronometer log failed", "error_type": type(e).__name__})
+            return {"error": f"Unexpected error: {type(e).__name__}"}

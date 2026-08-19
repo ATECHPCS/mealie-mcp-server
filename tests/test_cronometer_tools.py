@@ -125,6 +125,11 @@ NUTRITIOUS = {
     (True, None),      # bool is not a nutrition value
     (float("nan"), None),
     (float("inf"), None),
+    # malformed values must fail closed, not yield a misleading prefix
+    ("1,23 g", None),
+    ("12abc34", None),
+    ("1.2.3 g", None),
+    ("1,234,567", 1234567.0),
 ])
 def test_number_parsing(raw, expected):
     assert _number(raw) == expected
@@ -195,6 +200,44 @@ def test_edited_macros_make_a_new_food_not_stale_reuse():
     assert _macro_fingerprint(extract_macros(edited["nutrition"])) != base
 
 
+class BridgeLikeCron(FakeCron):
+    """Models the real bridge: custom-food names are truncated to 200 chars on
+    create, and find compares the (full) query name against stored names."""
+
+    CAP = 200
+
+    def __init__(self):
+        super().__init__()
+        self._by_name = {}
+
+    def find_custom_food(self, name):
+        target = name.strip().lower()
+        for stored, rec in self._by_name.items():
+            if stored.strip().lower() == target:
+                return dict(rec)
+        return None
+
+    def add_custom_food(self, name, macros, serving_grams):
+        rec = super().add_custom_food(name, macros, serving_grams)
+        self._by_name[name[: self.CAP]] = rec  # bridge truncates the stored name
+        return rec
+
+
+def test_long_recipe_name_still_reuses_one_food():
+    long_name = "Grandma's " + "Very " * 60 + "Chili"  # > 200 chars
+    fm = FakeMealie({"name": long_name, "slug": "long-chili", "nutrition": NUTRITIOUS["nutrition"]})
+    cron = BridgeLikeCron()
+    log_recipe_core(fm, cron, "long-chili", servings=1)
+    log_recipe_core(fm, cron, "long-chili", servings=1)
+    assert len(cron.created) == 1  # second log reuses the first food, no duplicate
+
+
+def test_servings_overflow_rejected():
+    cron = FakeCron()
+    out = log_recipe_core(FakeMealie(NUTRITIOUS), cron, "chili", servings=1e308)
+    assert "error" in out and cron.entries == []
+
+
 def test_missing_nutrition_returns_needs_nutrition():
     out = log_recipe_core(FakeMealie({"name": "Plain", "slug": "plain", "nutrition": {}}),
                           FakeCron(), "plain")
@@ -263,8 +306,9 @@ def test_call_unwraps_nested_success(monkeypatch):
     assert c.call("add_food_entry", {})["entry"]["id"] == 42
 
 
-def test_add_food_entry_raises_without_entry_id(monkeypatch):
-    inner = json.dumps({"status": "success", "entry": {}})  # success but no id
+@pytest.mark.parametrize("entry", [{}, {"id": None}, {"id": ""}, {"id": "   "}])
+def test_add_food_entry_raises_on_blank_id(monkeypatch, entry):
+    inner = json.dumps({"status": "success", "entry": entry})
     body = {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": inner}]}}
     c = _client_with_post(monkeypatch, _resp(json.dumps(body)))
     with pytest.raises(CronometerError):

@@ -14,7 +14,8 @@ class ParserMixin:
 
         Args:
             ingredients: Raw ingredient text, e.g. "2 lb boneless chicken thighs"
-            parser: Registered Mealie parser to use ("nlp" or "brute")
+            parser: Registered Mealie parser to use ("nlp", "brute", or "openai" —
+                the group's configured AI provider)
 
         Returns:
             List[Dict[str, Any]]: One result per input, in the same order, each

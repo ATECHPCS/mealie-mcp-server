@@ -25,6 +25,7 @@ test without a live Mealie. `CleanupMixin` wires them to the real client.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from .food_dedupe import norm, resolve_existing
@@ -40,6 +41,52 @@ from .ingredient_cleanup import (
 logger = logging.getLogger("mealie-mcp")
 
 DEFAULT_CONFIDENCE = 0.85
+
+# Lines the local NLP parser is unsure about get a second pass through Mealie's
+# AI parser (the group's configured AI provider). Off with AI_PARSE_FALLBACK=false.
+AI_PARSE_FALLBACK = os.getenv("AI_PARSE_FALLBACK", "true").strip().lower() not in (
+    "0", "false", "no", "off"
+)
+
+
+def parse_with_ai_fallback(
+    texts: List[str],
+    parse: Callable[[List[str], str], List[Dict[str, Any]]],
+    confidence: float = DEFAULT_CONFIDENCE,
+    enabled: bool = True,
+) -> List[Dict[str, Any]]:
+    """NLP-parse every line, then re-parse only the weak ones with AI.
+
+    A line is weak when its NLP confidence is below ``confidence`` or it has no
+    food. The AI answer replaces the NLP one only if it names a food and echoes
+    back the exact input (so positional alignment can't drift). Any AI failure
+    leaves the NLP results untouched — never worse than NLP alone. Each result
+    gets a ``parser`` key ("nlp" or "openai") for reporting.
+    """
+    results = [dict(r or {}, parser="nlp") for r in parse(texts, "nlp")] if texts else []
+    if not enabled or len(results) != len(texts):
+        return results
+
+    def weak(r: Dict[str, Any]) -> bool:
+        conf = (r.get("confidence") or {}).get("average") or 0
+        food = ((r.get("ingredient") or {}).get("food") or {}).get("name")
+        return conf < confidence or not food
+
+    idx = [i for i, r in enumerate(results) if weak(r)]
+    if not idx:
+        return results
+    try:
+        ai = parse([texts[i] for i in idx], "openai")
+    except Exception as exc:  # noqa: BLE001 — AI outage must not break cleanup
+        logger.warning({"message": "AI parse fallback failed; keeping NLP", "error": str(exc)})
+        return results
+    if not isinstance(ai, list) or len(ai) != len(idx):
+        return results
+    for i, r in zip(idx, ai):
+        food = (((r or {}).get("ingredient") or {}).get("food") or {}).get("name")
+        if food and (r or {}).get("input") == texts[i]:
+            results[i] = dict(r, parser="openai")
+    return results
 
 # Dispositions
 AUTO = "auto"
@@ -233,6 +280,7 @@ def build_plan(
                     "note": _merge_note(cand.note_extra, ing_obj.get("note") or ""),
                     "structurally_valid": structurally_valid,
                     "ok": ok,
+                    "parser": (p or {}).get("parser", "nlp"),
                 }
             )
         rec["proposals"] = proposals
@@ -390,6 +438,14 @@ def apply_plan(
 class CleanupMixin:
     """Recipe-ingredient cleanup, wired to the live Mealie client."""
 
+    def _parse_for_cleanup(self, texts: List[str], confidence: float) -> List[Dict[str, Any]]:
+        return parse_with_ai_fallback(
+            texts,
+            lambda t, parser: self.parse_ingredients(t, parser=parser),
+            confidence=confidence,
+            enabled=AI_PARSE_FALLBACK,
+        )
+
     def _food_index(self) -> tuple[List[str], Dict[str, str]]:
         foods = self.get_all_foods()
         names = [f["name"] for f in foods if f.get("name")]
@@ -421,7 +477,7 @@ class CleanupMixin:
             known_titles = self._recipe_titles()
         plan = build_plan(
             raw_ings,
-            parse_fn=lambda texts: self.parse_ingredients(texts),
+            parse_fn=lambda texts: self._parse_for_cleanup(texts, confidence),
             food_names=food_names,
             food_id_by_name=food_id_by_name,
             known_titles=known_titles,
@@ -449,7 +505,7 @@ class CleanupMixin:
         if plan is None:
             plan = build_plan(
                 raw_ings,
-                parse_fn=lambda texts: self.parse_ingredients(texts),
+                parse_fn=lambda texts: self._parse_for_cleanup(texts, confidence),
                 food_names=food_names,
                 food_id_by_name=food_id_by_name,
                 known_titles=self._recipe_titles(),

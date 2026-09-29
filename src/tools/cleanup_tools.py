@@ -106,6 +106,7 @@ def register_cleanup_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                 items = items[:limit]
 
             totals = {"auto": 0, "review": 0, "section": 0, "recipe_ref": 0, "skip": 0}
+            ai_parsed = 0  # weak NLP lines re-parsed by Mealie's AI parser
             per_recipe = []
             review_queue = []
             written = 0
@@ -124,6 +125,10 @@ def register_cleanup_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                     continue
                 for k in totals:
                     totals[k] += plan["counts"].get(k, 0)
+                ai_parsed += sum(
+                    1 for ln in plan["lines"] for pr in ln.get("proposals", [])
+                    if pr.get("parser") == "openai"
+                )
                 # report only lines that will actually remain for a human after
                 # this apply (an opted-in review run clears the applied ones)
                 for ln in held_lines(plan, dry_run=dry_run, apply_reviews=apply_reviews):
@@ -152,6 +157,7 @@ def register_cleanup_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                 "dry_run": dry_run,
                 "recipes_with_unstructured": len(per_recipe),
                 "totals": totals,
+                "ai_parsed_lines": ai_parsed,
                 "lines_written": written,
                 "manual_review_queue": review_queue,
                 "per_recipe": per_recipe,

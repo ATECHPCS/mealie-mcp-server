@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
 from mealie import MealieFetcher
+from mealie.recipe_dedupe import find_duplicates
 from models.recipe import (
     OrganizerRef,
     Recipe,
@@ -116,6 +117,29 @@ def _env_flag(name: str, default: bool) -> bool:
     return os.getenv(name, "true" if default else "false").strip().lower() in (
         "1", "true", "yes", "on",
     )
+
+
+def _existing_recipes(mealie: MealieFetcher) -> List[Dict[str, Any]]:
+    resp = mealie.get_recipes(per_page=-1)
+    return resp.get("items", []) if isinstance(resp, dict) else []
+
+
+def _duplicate_response(
+    dups: List[Dict[str, Any]], removed: Optional[str] = None
+) -> Dict[str, Any]:
+    first = dups[0]
+    what = f"'{removed}' looks like" if removed else "This looks like"
+    return {
+        "imported": False,
+        "duplicate": True,
+        "needs_confirmation": True,
+        "existing": dups,
+        "removed_new_copy": removed,
+        "question": (
+            f"{what} a duplicate of '{first['name']}' ({first['reason']}). "
+            "Keep the existing recipe, or import it anyway?"
+        ),
+    }
 
 
 def _clean_ingredients_after_save(
@@ -406,7 +430,7 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
 
     @mcp.tool()
     def import_recipe_from_url(
-        url: str, include_tags: bool = False
+        url: str, include_tags: bool = False, allow_duplicate: bool = False
     ) -> Dict[str, Any]:
         """Import a recipe into Mealie by scraping a URL.
 
@@ -435,6 +459,13 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
             url: Source URL of the recipe to import.
             include_tags: If True, import tags Mealie extracts from the source.
                 Defaults to False.
+            allow_duplicate: import even if the library already has this
+                recipe. Only set after Ian says to import it anyway.
+
+        If the recipe is already in Mealie (same source URL, or same name once
+        imported), nothing is kept and the result has `duplicate: true`,
+        `needs_confirmation: true` and a `question` — ask Ian, and re-call with
+        allow_duplicate=true only if he wants a second copy.
 
         Returns:
             Dict[str, Any]: The created recipe, including slug, name,
@@ -442,8 +473,16 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         """
         try:
             logger.info({"message": "Importing recipe from URL", "url": url})
+            existing = [] if allow_duplicate else _existing_recipes(mealie)
+            dups = find_duplicates(existing, url=url)
+            if dups:
+                return _duplicate_response(dups)
             slug = mealie.import_recipe_from_url(url, include_tags=include_tags)
             recipe = mealie.get_recipe(slug)
+            dups = find_duplicates(existing, name=recipe.get("name"), exclude_slug=slug)
+            if dups:
+                mealie.delete_recipe(slug)
+                return _duplicate_response(dups, removed=recipe.get("name"))
             return _clean_ingredients_after_save(mealie, slug, recipe)
         except Exception as e:
             error_msg = f"Error importing recipe from URL '{url}': {str(e)}"
@@ -459,6 +498,7 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         content: Optional[str] = None,
         translate_language: Optional[str] = None,
         create_new_organizers: bool = False,
+        allow_duplicate: bool = False,
     ) -> Dict[str, Any]:
         """Import a recipe using Mealie's AI (its configured AI provider).
 
@@ -485,6 +525,14 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                 (e.g. "English"). Omit to keep the source language.
             create_new_organizers: let the AI create new categories/tags.
                 Default False keeps Ian's controlled taxonomy.
+            allow_duplicate: import even if the library already has this
+                recipe. Only set after Ian says to import it anyway.
+
+        If the recipe is already in Mealie (same source URL, or same name once
+        the AI has read it), nothing is kept and the result has
+        `duplicate: true`, `needs_confirmation: true` and a `question` — ask
+        Ian, and re-call with allow_duplicate=true only if he wants a second
+        copy.
 
         Returns:
             The created recipe (slug, name, ingredients, instructions).
@@ -492,6 +540,10 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         if not (url or (content and content.strip())):
             raise ToolError("Give a url, content, or both")
         try:
+            existing = [] if allow_duplicate else _existing_recipes(mealie)
+            dups = find_duplicates(existing, url=url)
+            if dups:
+                return _duplicate_response(dups)
             slug = mealie.import_recipe_with_ai(
                 url=url,
                 content=content,
@@ -499,6 +551,10 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                 create_new_organizers=create_new_organizers,
             )
             recipe = mealie.get_recipe(slug)
+            dups = find_duplicates(existing, name=recipe.get("name"), exclude_slug=slug)
+            if dups:
+                mealie.delete_recipe(slug)
+                return _duplicate_response(dups, removed=recipe.get("name"))
             return _clean_ingredients_after_save(mealie, slug, recipe)
         except Exception as e:
             error_msg = f"Error importing recipe with AI ({url or 'text'}): {str(e)}"

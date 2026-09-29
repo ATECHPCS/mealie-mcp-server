@@ -43,6 +43,7 @@ class FakeFetcher(MealieFetcher):
         self.requests = []
         self.created_slug = "test-recipe"
         self.recipe = dict(BASE_RECIPE)
+        self.existing_recipes = []  # GET /api/recipes list
 
     def _handle_request(self, method, url, **kwargs):
         self.requests.append(
@@ -55,6 +56,9 @@ class FakeFetcher(MealieFetcher):
                 "timeout": kwargs.get("timeout"),
             }
         )
+        if method == "GET" and url == "/api/recipes":
+            items = list(self.existing_recipes)
+            return {"items": items, "page": 1, "perPage": -1, "total": len(items)}
         if method == "POST" and url == "/api/recipes":
             name = (kwargs.get("json") or {}).get("name")
             if name:

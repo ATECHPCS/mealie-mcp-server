@@ -1,0 +1,93 @@
+"""Spot an import that duplicates a recipe already in Mealie.
+
+Two signals:
+
+- **Same source URL**, compared without scheme, ``www.``, query string,
+  fragment or trailing slash. A URL that two or more existing recipes already
+  share (e.g. ``facebook.com/saved``) identifies a page, not a recipe, and is
+  ignored.
+- **Same name**: equal after lowercasing, dropping punctuation, making words
+  singular, ignoring word order and a few filler words ("easy", "best",
+  "recipe"...), or a spelling variant of the same length. "Lemon Garlic Shrimp"
+  matches "Garlic-Lemon Shrimp"; "Shrimp Tacos" does not match "Shrimp".
+"""
+
+from __future__ import annotations
+
+import difflib
+import re
+from collections import Counter
+from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import urlsplit
+
+FILLER_WORDS = frozenset({
+    "easy", "best", "simple", "quick", "homemade", "recipe", "the", "a", "an",
+    "my", "perfect", "ultimate", "delicious", "copycat",
+})
+SPELLING_RATIO = 0.92
+
+
+def normalize_url(url: Optional[str]) -> Optional[str]:
+    if not url or not url.strip():
+        return None
+    parts = urlsplit(url.strip() if "://" in url else f"https://{url.strip()}")
+    host = (parts.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = parts.path.rstrip("/")
+    return f"{host}{path}" if host else None
+
+
+def _singular(word: str) -> str:
+    if len(word) <= 3 or word.endswith("ss"):
+        return word
+    if word.endswith("ies"):
+        return word[:-3] + "y"
+    if word.endswith("oes") or re.search(r"(ch|sh|x|ss)es$", word):
+        return word[:-2]
+    if word.endswith("s"):
+        return word[:-1]
+    return word
+
+
+def name_key(name: Optional[str]) -> frozenset:
+    words = [_singular(w) for w in re.findall(r"[a-z0-9]+", (name or "").lower())]
+    core = [w for w in words if w not in FILLER_WORDS]
+    return frozenset(core or words)
+
+
+def _same_name(a: str, b: str) -> Optional[str]:
+    ka, kb = name_key(a), name_key(b)
+    if not ka or not kb:
+        return None
+    if ka == kb:
+        return "same name"
+    ja, jb = " ".join(sorted(ka)), " ".join(sorted(kb))
+    if len(ka) == len(kb) and min(len(ja), len(jb)) >= 6:
+        if difflib.SequenceMatcher(None, ja, jb).ratio() >= SPELLING_RATIO:
+            return "spelling variant of the name"
+    return None
+
+
+def find_duplicates(
+    recipes: Iterable[Dict[str, Any]],
+    name: Optional[str] = None,
+    url: Optional[str] = None,
+    exclude_slug: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Existing recipes that ``name``/``url`` duplicates, each with a reason."""
+    recipes = [r for r in recipes if r.get("slug") != exclude_slug]
+    url_counts = Counter(normalize_url(r.get("orgURL")) for r in recipes)
+    want_url = normalize_url(url)
+    out: List[Dict[str, Any]] = []
+    for r in recipes:
+        reason = None
+        r_url = normalize_url(r.get("orgURL"))
+        if want_url and r_url == want_url and url_counts[r_url] == 1:
+            reason = "same source URL"
+        elif name:
+            reason = _same_name(name, r.get("name") or "")
+        if reason:
+            out.append({"slug": r.get("slug"), "name": r.get("name"),
+                        "source_url": r.get("orgURL"), "reason": reason})
+    return out

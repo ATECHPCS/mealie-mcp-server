@@ -1,0 +1,46 @@
+"""Duplicate-recipe detection on import."""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from mealie.recipe_dedupe import find_duplicates, normalize_url  # noqa: E402
+
+LIB = [
+    {"slug": "lemon-garlic-shrimp", "name": "Lemon Garlic Shrimp",
+     "orgURL": "https://www.example.com/shrimp/?utm_source=x#recipe"},
+    {"slug": "shrimp", "name": "Shrimp", "orgURL": None},
+    {"slug": "a", "name": "Keto Waffles", "orgURL": "https://www.facebook.com/saved"},
+    {"slug": "b", "name": "Taco Bowl", "orgURL": "https://www.facebook.com/saved"},
+]
+
+
+def test_normalize_url():
+    assert normalize_url("https://www.Example.com/shrimp/?utm=1#r") == "example.com/shrimp"
+    assert normalize_url("example.com/shrimp") == "example.com/shrimp"
+    assert normalize_url("") is None
+
+
+def test_same_url_matches_ignoring_www_query_fragment():
+    d = find_duplicates(LIB, url="http://example.com/shrimp")
+    assert [x["slug"] for x in d] == ["lemon-garlic-shrimp"]
+    assert d[0]["reason"] == "same source URL"
+
+
+def test_shared_generic_url_is_ignored():
+    assert find_duplicates(LIB, url="https://facebook.com/saved") == []
+
+
+def test_name_matches_order_plural_filler_and_spelling():
+    for name in ["Garlic-Lemon Shrimp", "Easy Lemon Garlic Shrimps", "Lemon Garlik Shrimp"]:
+        assert [x["slug"] for x in find_duplicates(LIB, name=name)] == ["lemon-garlic-shrimp"], name
+
+
+def test_different_dish_is_not_a_duplicate():
+    assert find_duplicates(LIB, name="Shrimp Tacos") == []
+    assert find_duplicates(LIB, name="Garlic Butter Shrimp") == []
+
+
+def test_new_recipe_excluded_from_its_own_check():
+    assert find_duplicates(LIB, name="Shrimp", exclude_slug="shrimp") == []

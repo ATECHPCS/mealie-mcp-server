@@ -254,3 +254,31 @@ async def test_import_recipe_with_ai_requires_url_or_content(invoke, fetcher):
     with pytest.raises(ToolError):
         await invoke("import_recipe_with_ai", content="   ")
     assert not any(r["url"] == "/api/recipes/create/ai" for r in fetcher.requests)
+
+
+async def test_import_with_ai_stops_before_ai_on_known_url(invoke, fetcher):
+    fetcher.existing_recipes = [
+        {"slug": "old", "name": "Old Shrimp", "orgURL": "https://www.example.com/shrimp"}
+    ]
+    res = await invoke("import_recipe_with_ai", url="https://example.com/shrimp/")
+    assert res["duplicate"] is True and res["needs_confirmation"] is True
+    assert res["existing"][0]["slug"] == "old"
+    assert not any(r["url"] == "/api/recipes/create/ai" for r in fetcher.requests)
+
+
+async def test_import_with_ai_deletes_new_copy_on_same_name(invoke, fetcher):
+    fetcher.existing_recipes = [{"slug": "test-recipe-old", "name": "Test Recipe", "orgURL": None}]
+    res = await invoke("import_recipe_with_ai", content="some recipe text")
+    assert res["duplicate"] is True
+    assert res["removed_new_copy"] == "Test Recipe"
+    assert fetcher.last("DELETE", "/api/recipes/test-recipe")
+
+
+async def test_import_from_url_allow_duplicate_skips_check(invoke, fetcher, monkeypatch):
+    monkeypatch.setenv("MEALIE_IMPORT_AUTO_CLEANUP", "false")
+    fetcher.existing_recipes = [{"slug": "test-recipe-old", "name": "Test Recipe", "orgURL": None}]
+    res = await invoke("import_recipe_from_url", url="https://example.com/r", allow_duplicate=True)
+    assert not res.get("duplicate")
+    assert not fetcher.last("DELETE", "/api/recipes/")
+    # no library fetch when duplicates are allowed
+    assert not any(r["method"] == "GET" and r["url"] == "/api/recipes" for r in fetcher.requests)

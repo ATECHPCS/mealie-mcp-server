@@ -37,6 +37,19 @@ def test_name_matches_order_plural_filler_and_spelling():
         assert [x["slug"] for x in find_duplicates(LIB, name=name)] == ["lemon-garlic-shrimp"], name
 
 
+def test_parenthetical_and_numbers_ignored():
+    lib = [{"slug": "w", "name": "Publix Sweet & Spicy Chili Boneless Chicken Wings (10 pc)"}]
+    d = find_duplicates(lib, name="Publix Sweet & Spicy Chili Boneless Chicken Wings")
+    assert d and d[0]["reason"] == "same name"
+
+
+def test_contained_name_with_three_words_asks():
+    lib = [{"slug": "l", "name": "Lemon Garlic Butter Shrimp"}]
+    d = find_duplicates(lib, name="Garlic Butter Shrimp")
+    assert d and d[0]["reason"] == "very similar name"
+    assert find_duplicates(lib, name="Butter Shrimp") == []  # only 2 words
+
+
 def test_different_dish_is_not_a_duplicate():
     assert find_duplicates(LIB, name="Shrimp Tacos") == []
     assert find_duplicates(LIB, name="Garlic Butter Shrimp") == []

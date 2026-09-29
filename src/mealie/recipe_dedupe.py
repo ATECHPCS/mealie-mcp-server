@@ -6,10 +6,14 @@ Two signals:
   fragment or trailing slash. A URL that two or more existing recipes already
   share (e.g. ``facebook.com/saved``) identifies a page, not a recipe, and is
   ignored.
-- **Same name**: equal after lowercasing, dropping punctuation, making words
-  singular, ignoring word order and a few filler words ("easy", "best",
-  "recipe"...), or a spelling variant of the same length. "Lemon Garlic Shrimp"
-  matches "Garlic-Lemon Shrimp"; "Shrimp Tacos" does not match "Shrimp".
+- **Same name**: equal after lowercasing, dropping punctuation, parenthetical
+  asides and bare numbers ("(10 pc)"), making words singular, ignoring word
+  order and a few filler words ("easy", "best", "recipe"...), or a spelling
+  variant of the same length. "Lemon Garlic Shrimp" matches "Garlic-Lemon
+  Shrimp"; "Shrimp Tacos" does not match "Shrimp".
+- **Very similar name**: one name's words all appear in the other and the
+  shorter has at least 3 words ("Garlic Butter Shrimp" / "Lemon Garlic Butter
+  Shrimp"). AI imports often trim or embellish a title, and this only asks.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ FILLER_WORDS = frozenset({
     "my", "perfect", "ultimate", "delicious", "copycat",
 })
 SPELLING_RATIO = 0.92
+MIN_CONTAINED_WORDS = 3
 
 
 def normalize_url(url: Optional[str]) -> Optional[str]:
@@ -51,7 +56,8 @@ def _singular(word: str) -> str:
 
 
 def name_key(name: Optional[str]) -> frozenset:
-    words = [_singular(w) for w in re.findall(r"[a-z0-9]+", (name or "").lower())]
+    text = re.sub(r"\([^)]*\)", " ", (name or "").lower())
+    words = [_singular(w) for w in re.findall(r"[a-z0-9]+", text) if not w.isdigit()]
     core = [w for w in words if w not in FILLER_WORDS]
     return frozenset(core or words)
 
@@ -66,6 +72,9 @@ def _same_name(a: str, b: str) -> Optional[str]:
     if len(ka) == len(kb) and min(len(ja), len(jb)) >= 6:
         if difflib.SequenceMatcher(None, ja, jb).ratio() >= SPELLING_RATIO:
             return "spelling variant of the name"
+    small, big = (ka, kb) if len(ka) <= len(kb) else (kb, ka)
+    if len(small) >= MIN_CONTAINED_WORDS and small < big:
+        return "very similar name"
     return None
 
 

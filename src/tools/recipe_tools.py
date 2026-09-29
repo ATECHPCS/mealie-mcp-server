@@ -454,6 +454,61 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
             raise ToolError(error_msg)
 
     @mcp.tool()
+    def import_recipe_with_ai(
+        url: Optional[str] = None,
+        content: Optional[str] = None,
+        translate_language: Optional[str] = None,
+        create_new_organizers: bool = False,
+    ) -> Dict[str, Any]:
+        """Import a recipe using Mealie's AI (its configured AI provider).
+
+        Use this instead of import_recipe_from_url when:
+        - the link is a VIDEO (TikTok, Instagram, YouTube, Facebook): Mealie
+          downloads it and transcribes the audio;
+        - the site isn't a normal recipe page, or import_recipe_from_url failed
+          or returned the wrong recipe;
+        - Ian sends a PHOTO of a cookbook page or recipe card: read the photo
+          yourself and pass everything on it (title, servings, times,
+          ingredients, steps) as `content`, as close to verbatim as you can;
+        - Ian types or pastes a recipe.
+
+        The AI returns structured ingredients; the usual ingredient cleanup
+        still runs on anything left unstructured. Always check the returned
+        `name` and ingredients look right, then call grocy_sync_mealie_recipes
+        so the recipe reaches Grocy. A video can take a few minutes.
+
+        Args:
+            url: recipe page or video link. Optional if content is given.
+            content: recipe text (typed, pasted, or read from a photo). With a
+                url, it is used as extra notes.
+            translate_language: translate the recipe into this language
+                (e.g. "English"). Omit to keep the source language.
+            create_new_organizers: let the AI create new categories/tags.
+                Default False keeps Ian's controlled taxonomy.
+
+        Returns:
+            The created recipe (slug, name, ingredients, instructions).
+        """
+        if not (url or (content and content.strip())):
+            raise ToolError("Give a url, content, or both")
+        try:
+            slug = mealie.import_recipe_with_ai(
+                url=url,
+                content=content,
+                translate_language=translate_language,
+                create_new_organizers=create_new_organizers,
+            )
+            recipe = mealie.get_recipe(slug)
+            return _clean_ingredients_after_save(mealie, slug, recipe)
+        except Exception as e:
+            error_msg = f"Error importing recipe with AI ({url or 'text'}): {str(e)}"
+            logger.error({"message": error_msg})
+            logger.debug(
+                {"message": "Error traceback", "traceback": traceback.format_exc()}
+            )
+            raise ToolError(error_msg)
+
+    @mcp.tool()
     def update_recipe(
         slug: str,
         ingredients: List[Union[str, RecipeIngredientInput]],

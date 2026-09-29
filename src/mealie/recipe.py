@@ -141,6 +141,37 @@ class RecipeMixin:
             json={"url": url, "includeTags": include_tags},
         )
 
+    def import_recipe_with_ai(
+        self,
+        url: Optional[str] = None,
+        content: Optional[str] = None,
+        translate_language: Optional[str] = None,
+        create_new_organizers: bool = False,
+    ) -> str:
+        """Create a recipe with Mealie's "Import with AI" workflow.
+
+        Uses the group's configured AI provider. A URL may be a recipe page or a
+        video (Mealie downloads and transcribes it); ``content`` is free text —
+        a pasted recipe, HTML/JSON, or a transcription of a cookbook photo — and
+        is also sent alongside a URL as extra notes.
+
+        Returns:
+            Slug of the newly created recipe
+        """
+        if not (url or content):
+            raise ValueError("Give a url, content, or both")
+        # multipart/form-data fields (the endpoint also takes image files)
+        fields: Dict[str, Any] = {"createNewOrganizers": (None, str(bool(create_new_organizers)).lower())}
+        if url:
+            fields["url"] = (None, url)
+        if content:
+            fields["content"] = (None, content)
+        if translate_language:
+            fields["translateLanguage"] = (None, translate_language)
+        logger.info({"message": "Importing recipe with AI", "url": url, "has_content": bool(content)})
+        # video downloads + transcription can take minutes
+        return self._handle_request("POST", "/api/recipes/create/ai", files=fields, timeout=600.0)
+
     def patch_recipe(self, slug: str, recipe_data: Dict[str, Any]) -> Dict[str, Any]:
         """Partially update a recipe (only updates provided fields)
 

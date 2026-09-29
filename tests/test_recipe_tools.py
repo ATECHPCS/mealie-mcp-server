@@ -229,3 +229,28 @@ async def test_create_recipe_full_survives_bad_image_url(invoke, fetcher):
     assert isinstance(out, dict)
     # the create/update happened despite the image failure
     assert fetcher.last("PUT", "/api/recipes/") is not None
+
+
+async def test_import_recipe_with_ai_posts_multipart_and_returns_recipe(invoke, fetcher, monkeypatch):
+    monkeypatch.setenv("MEALIE_IMPORT_AUTO_CLEANUP", "false")
+    await invoke(
+        "import_recipe_with_ai",
+        url="https://www.tiktok.com/@chef/video/1",
+        content="extra notes",
+    )
+    call = fetcher.last("POST", "/api/recipes/create/ai")
+    assert call["files"]["url"] == (None, "https://www.tiktok.com/@chef/video/1")
+    assert call["files"]["content"] == (None, "extra notes")
+    assert call["files"]["createNewOrganizers"] == (None, "false")
+    assert "translateLanguage" not in call["files"]
+    assert call["timeout"] == 600.0
+    assert fetcher.last("GET", "/api/recipes/")  # created recipe fetched back
+
+
+async def test_import_recipe_with_ai_requires_url_or_content(invoke, fetcher):
+    import pytest
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError):
+        await invoke("import_recipe_with_ai", content="   ")
+    assert not any(r["url"] == "/api/recipes/create/ai" for r in fetcher.requests)

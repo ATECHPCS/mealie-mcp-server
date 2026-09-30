@@ -1,9 +1,10 @@
 import logging
 import os
 import re
+import threading
 import traceback
 import uuid
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -126,20 +127,71 @@ def _existing_recipes(mealie: MealieFetcher) -> List[Dict[str, Any]]:
 
 def _name_duplicates(
     mealie: MealieFetcher, existing: List[Dict[str, Any]], recipe: Dict[str, Any], slug: str
-) -> List[Dict[str, Any]]:
-    """Existing recipes with a matching name AND mostly the same ingredients."""
-    confirmed = []
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Existing recipes with a matching name, split into
+    (confirmed: mostly the same ingredients, unverified: couldn't compare).
+
+    Only confirmed ones justify deleting the new copy; unverified ones are
+    reported but the new recipe is kept.
+    """
+    confirmed, unverified = [], []
     for dup in find_duplicates(existing, name=recipe.get("name"), exclude_slug=slug):
         try:
             other = mealie.get_recipe(dup["slug"])
-        except Exception:  # noqa: BLE001 — can't compare: ask rather than skip
-            confirmed.append(dup)
+        except Exception:  # noqa: BLE001 — can't compare: keep, but say so
+            unverified.append(dup)
             continue
         m = ingredients_match(recipe, other if isinstance(other, dict) else {})
         if m["match"]:
             dup["reason"] += f", {m['shared']} of {m['of']} ingredients shared"
             confirmed.append(dup)
-    return confirmed
+        elif m.get("unknown"):
+            unverified.append(dup)
+    return confirmed, unverified
+
+
+def _check_after_import(
+    mealie: MealieFetcher, existing: List[Dict[str, Any]], recipe: Dict[str, Any], slug: str
+) -> Dict[str, Any]:
+    confirmed, unverified = _name_duplicates(mealie, existing, recipe, slug)
+    if confirmed:
+        mealie.delete_recipe(slug)
+        return _duplicate_response(confirmed, removed=recipe.get("name"))
+    if unverified:
+        recipe = dict(recipe)
+        recipe["possible_duplicates"] = unverified
+        recipe["possible_duplicate_note"] = (
+            "Imported and kept. A recipe with a similar name exists but its "
+            "ingredients couldn't be compared — mention it to Ian."
+        )
+    return recipe
+
+
+# One import at a time: two concurrent imports would each check the library
+# before the other's recipe exists and both keep their copy.
+_import_lock = threading.Lock()
+
+
+def _import_checked(
+    mealie: MealieFetcher,
+    do_import: Callable[[], str],
+    url: Optional[str],
+    allow_duplicate: bool,
+) -> Dict[str, Any]:
+    """Duplicate-guarded import: URL check, import, cleanup, name check."""
+    with _import_lock:
+        existing = [] if allow_duplicate else _existing_recipes(mealie)
+        dups = find_duplicates(existing, url=url)
+        if dups:
+            return _duplicate_response(dups)
+        slug = do_import()
+        recipe = mealie.get_recipe(slug)
+        # compare after cleanup: imports store raw lines ("1 cup almond
+        # flour") and only the cleanup turns them into foods
+        recipe = _clean_ingredients_after_save(mealie, slug, recipe)
+        if allow_duplicate:
+            return recipe
+        return _check_after_import(mealie, existing, recipe, slug)
 
 
 def _duplicate_response(
@@ -483,7 +535,9 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         If the recipe is already in Mealie (same source URL, or — once imported —
         a matching name with mostly the same ingredients), nothing is kept and the result has `duplicate: true`,
         `needs_confirmation: true` and a `question` — ask Ian, and re-call with
-        allow_duplicate=true only if he wants a second copy.
+        allow_duplicate=true only if he wants a second copy. If the result has
+        `possible_duplicates`, the recipe was kept but may repeat one of those —
+        mention it to Ian.
 
         Returns:
             Dict[str, Any]: The created recipe, including slug, name,
@@ -491,20 +545,12 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         """
         try:
             logger.info({"message": "Importing recipe from URL", "url": url})
-            existing = [] if allow_duplicate else _existing_recipes(mealie)
-            dups = find_duplicates(existing, url=url)
-            if dups:
-                return _duplicate_response(dups)
-            slug = mealie.import_recipe_from_url(url, include_tags=include_tags)
-            recipe = mealie.get_recipe(slug)
-            # compare after cleanup: imports store raw lines ("1 cup almond
-            # flour") and only the cleanup turns them into foods
-            recipe = _clean_ingredients_after_save(mealie, slug, recipe)
-            dups = _name_duplicates(mealie, existing, recipe, slug)
-            if dups:
-                mealie.delete_recipe(slug)
-                return _duplicate_response(dups, removed=recipe.get("name"))
-            return recipe
+            return _import_checked(
+                mealie,
+                lambda: mealie.import_recipe_from_url(url, include_tags=include_tags),
+                url,
+                allow_duplicate,
+            )
         except Exception as e:
             error_msg = f"Error importing recipe from URL '{url}': {str(e)}"
             logger.error({"message": error_msg})
@@ -554,7 +600,9 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         is kept and the result has
         `duplicate: true`, `needs_confirmation: true` and a `question` — ask
         Ian, and re-call with allow_duplicate=true only if he wants a second
-        copy.
+        copy. If the result has
+        `possible_duplicates`, the recipe was kept but may repeat one of those —
+        mention it to Ian.
 
         Returns:
             The created recipe (slug, name, ingredients, instructions).
@@ -562,25 +610,17 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         if not (url or (content and content.strip())):
             raise ToolError("Give a url, content, or both")
         try:
-            existing = [] if allow_duplicate else _existing_recipes(mealie)
-            dups = find_duplicates(existing, url=url)
-            if dups:
-                return _duplicate_response(dups)
-            slug = mealie.import_recipe_with_ai(
-                url=url,
-                content=content,
-                translate_language=translate_language,
-                create_new_organizers=create_new_organizers,
+            return _import_checked(
+                mealie,
+                lambda: mealie.import_recipe_with_ai(
+                    url=url,
+                    content=content,
+                    translate_language=translate_language,
+                    create_new_organizers=create_new_organizers,
+                ),
+                url,
+                allow_duplicate,
             )
-            recipe = mealie.get_recipe(slug)
-            # compare after cleanup: imports store raw lines ("1 cup almond
-            # flour") and only the cleanup turns them into foods
-            recipe = _clean_ingredients_after_save(mealie, slug, recipe)
-            dups = _name_duplicates(mealie, existing, recipe, slug)
-            if dups:
-                mealie.delete_recipe(slug)
-                return _duplicate_response(dups, removed=recipe.get("name"))
-            return recipe
         except Exception as e:
             error_msg = f"Error importing recipe with AI ({url or 'text'}): {str(e)}"
             logger.error({"message": error_msg})

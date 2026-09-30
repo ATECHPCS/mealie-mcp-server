@@ -2,8 +2,10 @@
 
 Two signals:
 
-- **Same source URL**, compared without scheme, ``www.``, query string,
-  fragment or trailing slash. A URL that two or more existing recipes already
+- **Same source URL**, compared without scheme, ``www.``, tracking
+  parameters (``utm_*``, ``fbclid``, ``si``...), fragment or trailing slash.
+  Other query parameters are kept: ``youtube.com/watch?v=A`` and ``?v=B`` are
+  different videos. A URL that two or more existing recipes already
   share (e.g. ``facebook.com/saved``) identifies a page, not a recipe, and is
   ignored.
 - **Same name**: equal after lowercasing, dropping punctuation, parenthetical
@@ -27,7 +29,8 @@ import difflib
 import re
 from collections import Counter
 from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import urlsplit
+import unicodedata
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 FILLER_WORDS = frozenset({
     "easy", "best", "simple", "quick", "homemade", "recipe", "the", "a", "an",
@@ -46,6 +49,13 @@ _AMOUNT_WORDS = frozenset({
 })
 
 
+_TRACKING_PARAMS = frozenset({
+    "fbclid", "gclid", "dclid", "msclkid", "igshid", "igsh", "si", "mc_cid",
+    "mc_eid", "ref", "ref_src", "feature", "mibextid", "rdid", "share_url",
+    "_hsenc", "_hsmi", "sfnsn",
+})
+
+
 def normalize_url(url: Optional[str]) -> Optional[str]:
     if not url or not url.strip():
         return None
@@ -53,8 +63,21 @@ def normalize_url(url: Optional[str]) -> Optional[str]:
     host = (parts.hostname or "").lower()
     if host.startswith("www."):
         host = host[4:]
+    if not host:
+        return None
     path = parts.path.rstrip("/")
-    return f"{host}{path}" if host else None
+    query = sorted(
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if not k.lower().startswith("utm_") and k.lower() not in _TRACKING_PARAMS
+    )
+    return f"{host}{path}" + (f"?{urlencode(query)}" if query else "")
+
+
+def _words(text: Optional[str]) -> List[str]:
+    """Casefolded, accent-folded words; non-Latin scripts are kept."""
+    decomposed = unicodedata.normalize("NFKD", (text or "").casefold())
+    folded = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return re.findall(r"[^\W_]+", folded)
 
 
 def _singular(word: str) -> str:
@@ -70,8 +93,8 @@ def _singular(word: str) -> str:
 
 
 def name_key(name: Optional[str]) -> frozenset:
-    text = re.sub(r"\([^)]*\)", " ", (name or "").lower())
-    words = [_singular(w) for w in re.findall(r"[a-z0-9]+", text) if not w.isdigit()]
+    text = re.sub(r"\([^)]*\)", " ", name or "")
+    words = [_singular(w) for w in _words(text) if not w.isdigit()]
     core = [w for w in words if w not in FILLER_WORDS]
     return frozenset(core or words)
 
@@ -121,7 +144,7 @@ def food_keys(recipe: Dict[str, Any]) -> set:
     out = set()
     for ing in recipe.get("recipeIngredient") or []:
         food = (ing.get("food") or {}).get("name")
-        words = [_singular(w) for w in re.findall(r"[a-z]+", (food or ing.get("note") or "").lower())]
+        words = [_singular(w) for w in _words(food or ing.get("note")) if not w.isdigit()]
         if not food:  # raw line: drop the leading amount/unit words
             while words and words[0] in _AMOUNT_WORDS:
                 words.pop(0)
@@ -133,14 +156,15 @@ def food_keys(recipe: Dict[str, Any]) -> set:
 def ingredients_match(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
     """Whether two recipes share enough ingredients to be the same recipe.
 
-    Recipes with no ingredients can't be judged, so they count as a match —
-    the caller asks rather than silently importing a copy.
+    Recipes with no readable ingredients can't be judged: that is ``match:
+    False, unknown: True`` — never evidence for deleting anything.
     """
     fa, fb = food_keys(a), food_keys(b)
     if not fa or not fb:
-        return {"match": True, "shared": 0, "of": max(len(fa), len(fb)), "ratio": None}
+        return {"match": False, "unknown": True, "shared": 0,
+                "of": max(len(fa), len(fb)), "ratio": None}
     shared, biggest = len(fa & fb), max(len(fa), len(fb))
     ratio = shared / biggest
     needed = min(MIN_SHARED_FOODS, biggest)
-    return {"match": ratio >= MIN_SHARED_RATIO and shared >= needed,
+    return {"match": ratio >= MIN_SHARED_RATIO and shared >= needed, "unknown": False,
             "shared": shared, "of": biggest, "ratio": round(ratio, 2)}

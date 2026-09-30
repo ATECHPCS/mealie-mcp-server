@@ -17,7 +17,10 @@ LIB = [
 
 
 def test_normalize_url():
-    assert normalize_url("https://www.Example.com/shrimp/?utm=1#r") == "example.com/shrimp"
+    assert normalize_url("https://www.Example.com/shrimp/?utm_source=1&fbclid=x#r") == "example.com/shrimp"
+    # identifying query params are kept (different videos)
+    assert normalize_url("https://youtube.com/watch?v=AAA&si=zz") == "youtube.com/watch?v=AAA"
+    assert normalize_url("https://youtube.com/watch?v=AAA") != normalize_url("https://youtube.com/watch?v=BBB")
     assert normalize_url("example.com/shrimp") == "example.com/shrimp"
     assert normalize_url("") is None
 
@@ -70,7 +73,8 @@ def test_ingredients_match_thresholds():
     assert not ingredients_match(_r("a", "b", "c", "d"), _r("a", "b", "x", "y"))["match"]  # 50%
     assert not ingredients_match(_r("water", "coffee"), _r("water", "coffee", "milk"))["match"]
     assert ingredients_match(_r("water", "coffee", "milk"), _r("water", "coffee", "milk"))["match"]
-    assert ingredients_match({}, _r("a"))["match"]  # can't judge -> ask
+    unknown = ingredients_match({}, _r("a"))
+    assert not unknown["match"] and unknown["unknown"]  # can't judge -> never a match
 
 
 def test_raw_lines_compare_by_food_not_amount():
@@ -78,3 +82,12 @@ def test_raw_lines_compare_by_food_not_amount():
                                 ["1 cup almond flour", "2 large eggs", "1 tsp baking powder", "½ tsp salt"]]}
     parsed = _r("almond flour", "egg", "baking powder", "salt")
     assert ingredients_match(raw, parsed)["match"]
+
+
+def test_unicode_names_and_foods_stay_distinct():
+    lib = [{"slug": "c", "name": "鸡肉 Soup"}]
+    assert find_duplicates(lib, name="牛肉 Soup") == []
+    assert find_duplicates(lib, name="鸡肉 soup")  # same words still match
+    assert not ingredients_match(_r("鸡肉", "姜", "葱", "盐"), _r("牛肉", "蒜", "辣椒", "糖"))["match"]
+    assert ingredients_match(_r("Jalapeño", "egg", "cheese", "tortilla"),
+                             _r("jalapeno", "eggs", "cheese", "tortillas"))["match"]

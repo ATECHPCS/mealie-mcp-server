@@ -67,3 +67,13 @@ def test_disabled_or_all_confident_makes_no_ai_call():
     rec2 = Recorder({"2 eggs": NLP["2 eggs"]})
     parse_with_ai_fallback(["2 eggs"], rec2)
     assert [c[0] for c in rec.calls + rec2.calls] == ["nlp", "nlp"]
+
+
+def test_malformed_ai_entries_keep_nlp():
+    ai = {
+        "salt and pepper, to taste": {"input": "salt and pepper, to taste",
+                                      "ingredient": {"food": "salt"}},  # food not an object
+        "1 can black beans, drained": "garbage",
+    }
+    out = parse_with_ai_fallback(TEXTS, Recorder(NLP, ai))
+    assert [r["parser"] for r in out] == ["nlp"] * 3

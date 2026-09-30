@@ -266,12 +266,24 @@ async def test_import_with_ai_stops_before_ai_on_known_url(invoke, fetcher):
     assert not any(r["url"] == "/api/recipes/create/ai" for r in fetcher.requests)
 
 
-async def test_import_with_ai_deletes_new_copy_on_same_name(invoke, fetcher):
+async def test_import_with_ai_deletes_new_copy_on_same_name(invoke, fetcher, monkeypatch):
+    monkeypatch.setenv("MEALIE_IMPORT_AUTO_CLEANUP", "false")
+    ings = [{"food": {"name": f}, "note": ""} for f in ("egg", "tortilla", "cheese", "salsa")]
+    fetcher.recipe = {**fetcher.recipe, "recipeIngredient": ings}
     fetcher.existing_recipes = [{"slug": "test-recipe-old", "name": "Test Recipe", "orgURL": None}]
     res = await invoke("import_recipe_with_ai", content="some recipe text")
     assert res["duplicate"] is True
     assert res["removed_new_copy"] == "Test Recipe"
     assert fetcher.last("DELETE", "/api/recipes/test-recipe")
+
+
+async def test_uncomparable_same_name_is_kept_with_a_warning(invoke, fetcher, monkeypatch):
+    monkeypatch.setenv("MEALIE_IMPORT_AUTO_CLEANUP", "false")
+    fetcher.existing_recipes = [{"slug": "test-recipe-old", "name": "Test Recipe", "orgURL": None}]
+    res = await invoke("import_recipe_with_ai", content="some recipe text")  # no ingredients
+    assert not res.get("duplicate")
+    assert res["possible_duplicates"][0]["slug"] == "test-recipe-old"
+    assert not fetcher.last("DELETE", "/api/recipes/")
 
 
 async def test_import_from_url_allow_duplicate_skips_check(invoke, fetcher, monkeypatch):

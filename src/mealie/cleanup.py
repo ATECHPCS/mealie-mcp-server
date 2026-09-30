@@ -83,8 +83,11 @@ def parse_with_ai_fallback(
     if not isinstance(ai, list) or len(ai) != len(idx):
         return results
     for i, r in zip(idx, ai):
-        food = (((r or {}).get("ingredient") or {}).get("food") or {}).get("name")
-        if food and (r or {}).get("input") == texts[i]:
+        # validate every level: a malformed entry keeps the NLP result
+        ing = r.get("ingredient") if isinstance(r, dict) else None
+        food = ing.get("food") if isinstance(ing, dict) else None
+        name = food.get("name") if isinstance(food, dict) else None
+        if isinstance(name, str) and name.strip() and r.get("input") == texts[i]:
             results[i] = dict(r, parser="openai")
     return results
 

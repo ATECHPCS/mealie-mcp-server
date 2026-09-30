@@ -77,3 +77,28 @@ def test_malformed_ai_entries_keep_nlp():
     }
     out = parse_with_ai_fallback(TEXTS, Recorder(NLP, ai))
     assert [r["parser"] for r in out] == ["nlp"] * 3
+
+
+def test_ai_entries_with_bad_confidence_unit_or_quantity_keep_nlp():
+    t = "salt and pepper, to taste"
+    bad = [
+        {"input": t, "confidence": "bad", "ingredient": {"food": {"name": "salt"}}},
+        {"input": t, "confidence": {}, "ingredient": {"food": {"name": "salt"}, "unit": "tsp"}},
+        {"input": t, "confidence": {}, "ingredient": {"food": {"name": "salt"}, "quantity": "two"}},
+    ]
+    for entry in bad:
+        out = parse_with_ai_fallback([t], Recorder({t: NLP[t]}, {t: entry}))
+        assert out[0]["parser"] == "nlp", entry
+
+
+def test_ai_result_runs_through_build_plan():
+    from mealie.cleanup import build_plan
+
+    t = "1 can black beans, drained"
+    ai = {t: {"input": t, "confidence": {"average": 0.99},
+              "ingredient": {"quantity": 1.0, "unit": {"name": "can"},
+                             "food": {"name": "black bean"}, "note": "drained"}}}
+    rec = Recorder({t: NLP[t]}, ai)
+    plan = build_plan([{"note": t, "food": None}],
+                      parse_fn=lambda texts: parse_with_ai_fallback(texts, rec))
+    assert plan["lines"][0]["proposals"][0]["parser"] == "openai"

@@ -88,6 +88,8 @@ def test_unicode_names_and_foods_stay_distinct():
     lib = [{"slug": "c", "name": "鸡肉 Soup"}]
     assert find_duplicates(lib, name="牛肉 Soup") == []
     assert find_duplicates(lib, name="鸡肉 soup")  # same words still match
+    # Devanagari vowel signs are combining marks and must be kept
+    assert find_duplicates([{"slug": "s", "name": "चीनी कुकीज़"}], name="चूना कुकीज़") == []
     assert not ingredients_match(_r("鸡肉", "姜", "葱", "盐"), _r("牛肉", "蒜", "辣椒", "糖"))["match"]
     assert ingredients_match(_r("Jalapeño", "egg", "cheese", "tortilla"),
                              _r("jalapeno", "eggs", "cheese", "tortillas"))["match"]

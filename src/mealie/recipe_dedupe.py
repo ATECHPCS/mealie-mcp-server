@@ -74,10 +74,28 @@ def normalize_url(url: Optional[str]) -> Optional[str]:
 
 
 def _words(text: Optional[str]) -> List[str]:
-    """Casefolded, accent-folded words; non-Latin scripts are kept."""
-    decomposed = unicodedata.normalize("NFKD", (text or "").casefold())
-    folded = "".join(c for c in decomposed if not unicodedata.combining(c))
-    return re.findall(r"[^\W_]+", folded)
+    """Casefolded words. Only Latin letters lose accents ("Jalapeño" ->
+    "jalapeno"); combining marks of other scripts are part of the word."""
+    folded: List[str] = []
+    for ch in unicodedata.normalize("NFD", (text or "").casefold()):
+        if unicodedata.combining(ch) and folded and "LATIN" in unicodedata.name(folded[-1], ""):
+            continue
+        folded.append(ch)
+    words, cur = [], []
+    for ch in unicodedata.normalize("NFC", "".join(folded)):
+        if unicodedata.category(ch)[0] in "LMN":
+            cur.append(ch)
+        elif cur:
+            words.append("".join(cur))
+            cur = []
+    if cur:
+        words.append("".join(cur))
+    return words
+
+
+def _is_number(word: str) -> bool:
+    """"12", "½", "¾" ... — every character is a Unicode number."""
+    return all(unicodedata.category(c)[0] == "N" for c in word)
 
 
 def _singular(word: str) -> str:
@@ -94,7 +112,7 @@ def _singular(word: str) -> str:
 
 def name_key(name: Optional[str]) -> frozenset:
     text = re.sub(r"\([^)]*\)", " ", name or "")
-    words = [_singular(w) for w in _words(text) if not w.isdigit()]
+    words = [_singular(w) for w in _words(text) if not _is_number(w)]
     core = [w for w in words if w not in FILLER_WORDS]
     return frozenset(core or words)
 
@@ -144,7 +162,7 @@ def food_keys(recipe: Dict[str, Any]) -> set:
     out = set()
     for ing in recipe.get("recipeIngredient") or []:
         food = (ing.get("food") or {}).get("name")
-        words = [_singular(w) for w in _words(food or ing.get("note")) if not w.isdigit()]
+        words = [_singular(w) for w in _words(food or ing.get("note")) if not _is_number(w)]
         if not food:  # raw line: drop the leading amount/unit words
             while words and words[0] in _AMOUNT_WORDS:
                 words.pop(0)

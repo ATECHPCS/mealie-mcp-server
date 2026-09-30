@@ -83,13 +83,36 @@ def parse_with_ai_fallback(
     if not isinstance(ai, list) or len(ai) != len(idx):
         return results
     for i, r in zip(idx, ai):
-        # validate every level: a malformed entry keeps the NLP result
-        ing = r.get("ingredient") if isinstance(r, dict) else None
-        food = ing.get("food") if isinstance(ing, dict) else None
-        name = food.get("name") if isinstance(food, dict) else None
-        if isinstance(name, str) and name.strip() and r.get("input") == texts[i]:
+        if _valid_parse(r, texts[i]):
             results[i] = dict(r, parser="openai")
     return results
+
+
+def _valid_parse(r: Any, text: str) -> bool:
+    """Every field the cleanup reads has the shape it expects; anything else
+    keeps the NLP result."""
+    if not isinstance(r, dict) or r.get("input") != text:
+        return False
+    conf = r.get("confidence")
+    if conf is not None and not (
+        isinstance(conf, dict)
+        and all(v is None or isinstance(v, (int, float)) for v in conf.values())
+    ):
+        return False
+    ing = r.get("ingredient")
+    if not isinstance(ing, dict):
+        return False
+    food, unit = ing.get("food"), ing.get("unit")
+    if not isinstance(food, dict) or not isinstance(food.get("name"), str) or not food["name"].strip():
+        return False
+    if unit is not None and not (isinstance(unit, dict) and isinstance(unit.get("name", ""), (str, type(None)))):
+        return False
+    qty = ing.get("quantity")
+    if qty is not None and (isinstance(qty, bool) or not isinstance(qty, (int, float))):
+        return False
+    if ing.get("note") is not None and not isinstance(ing.get("note"), str):
+        return False
+    return True
 
 # Dispositions
 AUTO = "auto"

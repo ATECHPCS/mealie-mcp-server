@@ -44,6 +44,7 @@ class FakeFetcher(MealieFetcher):
         self.created_slug = "test-recipe"
         self.recipe = dict(BASE_RECIPE)
         self.existing_recipes = []  # GET /api/recipes list
+        self.recipes_by_slug = {}  # per-slug GET overrides
 
     def _handle_request(self, method, url, **kwargs):
         self.requests.append(
@@ -68,7 +69,8 @@ class FakeFetcher(MealieFetcher):
         if method == "POST" and url in ("/api/recipes/create/url", "/api/recipes/create/ai"):
             return self.created_slug
         if method == "GET" and url.startswith("/api/recipes/") and url.count("/") == 3:
-            return dict(self.recipe)
+            slug = url.rsplit("/", 1)[-1]
+            return dict(self.recipes_by_slug.get(slug, self.recipe))
         if method in ("PUT", "PATCH") and url.startswith("/api/recipes/"):
             return kwargs.get("json", {})
         # single-record GET (the fetch-merge update path reads the existing record)

@@ -282,3 +282,15 @@ async def test_import_from_url_allow_duplicate_skips_check(invoke, fetcher, monk
     assert not fetcher.last("DELETE", "/api/recipes/")
     # no library fetch when duplicates are allowed
     assert not any(r["method"] == "GET" and r["url"] == "/api/recipes" for r in fetcher.requests)
+
+
+async def test_same_name_with_different_ingredients_is_not_a_duplicate(invoke, fetcher, monkeypatch):
+    monkeypatch.setenv("MEALIE_IMPORT_AUTO_CLEANUP", "false")
+    ing = lambda *fs: [{"food": {"name": f}, "note": ""} for f in fs]  # noqa: E731
+    fetcher.recipe = {**fetcher.recipe, "recipeIngredient": ing("egg", "tortilla", "cheese", "salsa", "onion")}
+    fetcher.existing_recipes = [{"slug": "other-migas", "name": "Test Recipe", "orgURL": None}]
+    fetcher.recipes_by_slug = {"other-migas": {**fetcher.recipe, "slug": "other-migas",
+                                               "recipeIngredient": ing("egg", "chips", "jack", "pico", "avocado")}}
+    res = await invoke("import_recipe_with_ai", content="migas")
+    assert not res.get("duplicate")
+    assert not fetcher.last("DELETE", "/api/recipes/")

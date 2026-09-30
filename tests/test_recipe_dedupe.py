@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mealie.recipe_dedupe import find_duplicates, normalize_url  # noqa: E402
+from mealie.recipe_dedupe import find_duplicates, ingredients_match, normalize_url  # noqa: E402
 
 LIB = [
     {"slug": "lemon-garlic-shrimp", "name": "Lemon Garlic Shrimp",
@@ -57,3 +57,17 @@ def test_different_dish_is_not_a_duplicate():
 
 def test_new_recipe_excluded_from_its_own_check():
     assert find_duplicates(LIB, name="Shrimp", exclude_slug="shrimp") == []
+
+
+def _r(*foods):
+    return {"recipeIngredient": [{"food": {"name": f}} for f in foods]}
+
+
+def test_ingredients_match_thresholds():
+    keto = _r("tuna", "egg", "keto bun", "sugar-free honey", "scallion", "garlic", "soy sauce")
+    regular = _r("tuna", "egg", "brioche bun", "honey", "scallions", "garlic", "soy sauce")
+    assert ingredients_match(keto, regular)["match"]  # 5 of 7 shared, plural-insensitive
+    assert not ingredients_match(_r("a", "b", "c", "d"), _r("a", "b", "x", "y"))["match"]  # 50%
+    assert not ingredients_match(_r("water", "coffee"), _r("water", "coffee", "milk"))["match"]
+    assert ingredients_match(_r("water", "coffee", "milk"), _r("water", "coffee", "milk"))["match"]
+    assert ingredients_match({}, _r("a"))["match"]  # can't judge -> ask

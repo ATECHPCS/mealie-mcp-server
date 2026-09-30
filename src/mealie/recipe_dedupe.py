@@ -13,7 +13,12 @@ Two signals:
   Shrimp"; "Shrimp Tacos" does not match "Shrimp".
 - **Very similar name**: one name's words all appear in the other and the
   shorter has at least 3 words ("Garlic Butter Shrimp" / "Lemon Garlic Butter
-  Shrimp"). AI imports often trim or embellish a title, and this only asks.
+  Shrimp"). AI imports often trim or embellish a title.
+
+A name match alone is weak — this library has keto/regular variants and several
+unrelated recipes with overlapping titles — so callers confirm it with
+``ingredients_match``: the recipes must share at least 60% of their ingredients
+(by food), and at least 4 of them (all of them for shorter recipes).
 """
 
 from __future__ import annotations
@@ -30,6 +35,8 @@ FILLER_WORDS = frozenset({
 })
 SPELLING_RATIO = 0.92
 MIN_CONTAINED_WORDS = 3
+MIN_SHARED_RATIO = 0.6
+MIN_SHARED_FOODS = 4
 
 
 def normalize_url(url: Optional[str]) -> Optional[str]:
@@ -100,3 +107,30 @@ def find_duplicates(
             out.append({"slug": r.get("slug"), "name": r.get("name"),
                         "source_url": r.get("orgURL"), "reason": reason})
     return out
+
+
+def food_keys(recipe: Dict[str, Any]) -> set:
+    """Normalized food names of a recipe's ingredients (note text if unparsed)."""
+    out = set()
+    for ing in recipe.get("recipeIngredient") or []:
+        text = ((ing.get("food") or {}).get("name") or ing.get("note") or "").lower()
+        key = " ".join(_singular(w) for w in re.findall(r"[a-z]+", text))
+        if key:
+            out.add(key)
+    return out
+
+
+def ingredients_match(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    """Whether two recipes share enough ingredients to be the same recipe.
+
+    Recipes with no ingredients can't be judged, so they count as a match —
+    the caller asks rather than silently importing a copy.
+    """
+    fa, fb = food_keys(a), food_keys(b)
+    if not fa or not fb:
+        return {"match": True, "shared": 0, "of": max(len(fa), len(fb)), "ratio": None}
+    shared, biggest = len(fa & fb), max(len(fa), len(fb))
+    ratio = shared / biggest
+    needed = min(MIN_SHARED_FOODS, biggest)
+    return {"match": ratio >= MIN_SHARED_RATIO and shared >= needed,
+            "shared": shared, "of": biggest, "ratio": round(ratio, 2)}

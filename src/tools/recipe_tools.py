@@ -497,11 +497,14 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                 return _duplicate_response(dups)
             slug = mealie.import_recipe_from_url(url, include_tags=include_tags)
             recipe = mealie.get_recipe(slug)
+            # compare after cleanup: imports store raw lines ("1 cup almond
+            # flour") and only the cleanup turns them into foods
+            recipe = _clean_ingredients_after_save(mealie, slug, recipe)
             dups = _name_duplicates(mealie, existing, recipe, slug)
             if dups:
                 mealie.delete_recipe(slug)
                 return _duplicate_response(dups, removed=recipe.get("name"))
-            return _clean_ingredients_after_save(mealie, slug, recipe)
+            return recipe
         except Exception as e:
             error_msg = f"Error importing recipe from URL '{url}': {str(e)}"
             logger.error({"message": error_msg})
@@ -570,11 +573,14 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                 create_new_organizers=create_new_organizers,
             )
             recipe = mealie.get_recipe(slug)
+            # compare after cleanup: imports store raw lines ("1 cup almond
+            # flour") and only the cleanup turns them into foods
+            recipe = _clean_ingredients_after_save(mealie, slug, recipe)
             dups = _name_duplicates(mealie, existing, recipe, slug)
             if dups:
                 mealie.delete_recipe(slug)
                 return _duplicate_response(dups, removed=recipe.get("name"))
-            return _clean_ingredients_after_save(mealie, slug, recipe)
+            return recipe
         except Exception as e:
             error_msg = f"Error importing recipe with AI ({url or 'text'}): {str(e)}"
             logger.error({"message": error_msg})

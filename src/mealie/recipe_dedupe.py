@@ -37,6 +37,13 @@ SPELLING_RATIO = 0.92
 MIN_CONTAINED_WORDS = 3
 MIN_SHARED_RATIO = 0.6
 MIN_SHARED_FOODS = 4
+# leading words dropped from an unparsed ingredient line before comparing it
+_AMOUNT_WORDS = frozenset({
+    "cup", "tablespoon", "tbsp", "teaspoon", "tsp", "oz", "ounce", "lb", "pound",
+    "g", "gram", "kg", "kilogram", "ml", "milliliter", "l", "liter", "clove",
+    "pinch", "dash", "can", "slice", "stick", "package", "pkg", "bunch", "handful",
+    "large", "small", "medium", "of", "a", "an", "to", "and", "or",
+})
 
 
 def normalize_url(url: Optional[str]) -> Optional[str]:
@@ -113,10 +120,13 @@ def food_keys(recipe: Dict[str, Any]) -> set:
     """Normalized food names of a recipe's ingredients (note text if unparsed)."""
     out = set()
     for ing in recipe.get("recipeIngredient") or []:
-        text = ((ing.get("food") or {}).get("name") or ing.get("note") or "").lower()
-        key = " ".join(_singular(w) for w in re.findall(r"[a-z]+", text))
-        if key:
-            out.add(key)
+        food = (ing.get("food") or {}).get("name")
+        words = [_singular(w) for w in re.findall(r"[a-z]+", (food or ing.get("note") or "").lower())]
+        if not food:  # raw line: drop the leading amount/unit words
+            while words and words[0] in _AMOUNT_WORDS:
+                words.pop(0)
+        if words:
+            out.add(" ".join(words))
     return out
 
 

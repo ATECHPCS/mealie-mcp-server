@@ -71,3 +71,10 @@ def test_ingredients_match_thresholds():
     assert not ingredients_match(_r("water", "coffee"), _r("water", "coffee", "milk"))["match"]
     assert ingredients_match(_r("water", "coffee", "milk"), _r("water", "coffee", "milk"))["match"]
     assert ingredients_match({}, _r("a"))["match"]  # can't judge -> ask
+
+
+def test_raw_lines_compare_by_food_not_amount():
+    raw = {"recipeIngredient": [{"food": None, "note": n} for n in
+                                ["1 cup almond flour", "2 large eggs", "1 tsp baking powder", "½ tsp salt"]]}
+    parsed = _r("almond flour", "egg", "baking powder", "salt")
+    assert ingredients_match(raw, parsed)["match"]

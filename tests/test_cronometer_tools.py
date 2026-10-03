@@ -200,6 +200,14 @@ def test_edited_macros_make_a_new_food_not_stale_reuse():
     assert _macro_fingerprint(extract_macros(edited["nutrition"])) != base
 
 
+def test_fingerprint_matches_grocy_cook():
+    # grocy-cook's eat flow builds the same "<recipe> [fp]" name so both paths
+    # reuse ONE Cronometer food per recipe; it pins this value too
+    # (tests/test_eat_dedupe.py). Change both repos together or neither.
+    macros = {"calories": 634.0, "protein_g": 31.0, "fat_g": 54.0, "carbs_g": 8.0}
+    assert _macro_fingerprint(macros) == "0b3c55"
+
+
 class BridgeLikeCron(FakeCron):
     """Models the real bridge: custom-food names are truncated to 200 chars on
     create, and find compares the (full) query name against stored names."""

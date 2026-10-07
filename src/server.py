@@ -67,6 +67,10 @@ def main():
             mcp.settings.transport_security = TransportSecuritySettings(
                 enable_dns_rebinding_protection=False
             )
+            # Stateless: every request stands alone. Stateful sessions are
+            # reaped by the SDK after 30 idle minutes, and a long-lived client
+            # then gets a 404 on its next call. No tool here needs a session.
+            mcp.settings.stateless_http = True
 
             app = mcp.streamable_http_app()
 

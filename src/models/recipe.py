@@ -212,3 +212,44 @@ class OrganizerRef(BaseModel):
     slug: Optional[str] = Field(
         default=None, description="Optional slug; Mealie derives it when omitted."
     )
+
+
+def normalize_recipe_times(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill performTime/cookTime from each other for Mealie v3.31+ and older.
+
+    Mealie v3.31 dropped ``cookTime`` from API responses and moved existing
+    values into ``performTime`` (the UI already showed that as "Cook Time").
+    Older servers still return ``cookTime``. Readers should prefer
+    ``performTime`` and fall back to ``cookTime``; this also copies the
+    effective value into ``cookTime`` so older clients still see it.
+    """
+    out = dict(data)
+    perform = out.get("performTime") or None
+    cook = out.get("cookTime") or None
+    value = perform or cook
+    if value:
+        if not perform:
+            out["performTime"] = value
+        if not cook:
+            out["cookTime"] = value
+    return out
+
+
+def recipe_time_write_fields(
+    cook_time: Optional[str] = None,
+    perform_time: Optional[str] = None,
+) -> Dict[str, str]:
+    """Map tool time args to Mealie write fields, preferring performTime.
+
+    Mealie v3.31 still accepts ``cookTime`` on write, but stores cook time in
+    ``performTime``. If only ``cook_time`` is given, write it to both so older
+    servers keep a ``cookTime`` and v3.31+ get ``performTime``.
+    """
+    fields: Dict[str, str] = {}
+    if perform_time is not None:
+        fields["performTime"] = perform_time
+    if cook_time is not None:
+        fields["cookTime"] = cook_time
+        if perform_time is None:
+            fields["performTime"] = cook_time
+    return fields

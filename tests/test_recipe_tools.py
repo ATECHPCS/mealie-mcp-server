@@ -143,6 +143,48 @@ async def test_patch_recipe_maps_all_fields(invoke, fetcher):
     }
 
 
+
+async def test_patch_recipe_cook_time_writes_perform_time(invoke, fetcher):
+    # Mealie v3.31 stores cook time in performTime; still send cookTime too
+    # so older servers keep a cookTime value.
+    await invoke("patch_recipe", slug="test-recipe", cook_time="25 min")
+    body = fetcher.last("PATCH", "/api/recipes/")["json"]
+    assert body == {"cookTime": "25 min", "performTime": "25 min"}
+
+
+async def test_create_recipe_full_cook_time_writes_perform_time(invoke, fetcher):
+    await invoke(
+        "create_recipe_full",
+        name="Timed",
+        cook_time="25 min",
+        ingredients=["1 onion"],
+        instructions=["Chop."],
+    )
+    body = fetcher.last("PUT", "/api/recipes/")["json"]
+    assert body["cookTime"] == "25 min"
+    assert body["performTime"] == "25 min"
+
+
+async def test_get_recipe_detailed_fills_cook_time_from_perform_time(invoke, fetcher):
+    fetcher.recipe = {**fetcher.recipe, "performTime": "20 min"}
+    out = await invoke("get_recipe_detailed", slug="test-recipe")
+    assert out["performTime"] == "20 min"
+    assert out["cookTime"] == "20 min"
+
+
+async def test_get_recipe_detailed_fills_perform_time_from_cook_time(invoke, fetcher):
+    fetcher.recipe = {**fetcher.recipe, "cookTime": "PT25M"}
+    out = await invoke("get_recipe_detailed", slug="test-recipe")
+    assert out["performTime"] == "PT25M"
+    assert out["cookTime"] == "PT25M"
+
+
+async def test_get_recipe_concise_includes_perform_time(invoke, fetcher):
+    fetcher.recipe = {**fetcher.recipe, "performTime": "20 min"}
+    out = await invoke("get_recipe_concise", slug="test-recipe")
+    assert out["performTime"] == "20 min"
+    assert out["cookTime"] == "20 min"
+
 async def test_get_recipe_concise_includes_orgurl_tags_tools(invoke, fetcher):
     fetcher.recipe = {
         **fetcher.recipe,

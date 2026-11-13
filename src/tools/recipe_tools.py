@@ -20,6 +20,8 @@ from models.recipe import (
     RecipeInstructionInput,
     RecipeTag,
     RecipeTool,
+    normalize_recipe_times,
+    recipe_time_write_fields,
 )
 
 logger = logging.getLogger("mealie-mcp")
@@ -405,7 +407,7 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         """
         try:
             logger.info({"message": "Fetching recipe", "slug": slug})
-            return mealie.get_recipe(slug)
+            return normalize_recipe_times(mealie.get_recipe(slug))
         except Exception as e:
             error_msg = f"Error fetching recipe with slug '{slug}': {str(e)}"
             logger.error({"message": error_msg})
@@ -428,7 +430,7 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
         """
         try:
             logger.info({"message": "Fetching recipe", "slug": slug})
-            recipe_json = mealie.get_recipe(slug)
+            recipe_json = normalize_recipe_times(mealie.get_recipe(slug))
             recipe = Recipe.model_validate(recipe_json)
             return recipe.model_dump(
                 include={
@@ -438,6 +440,9 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                     "recipeYieldQuantity",
                     "recipeYield",
                     "totalTime",
+                    "prepTime",
+                    "cookTime",
+                    "performTime",
                     "rating",
                     "orgURL",
                     "tags",
@@ -698,8 +703,12 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
             org_url: Source URL for the recipe (shown as a link in the Mealie UI).
             total_time: Total time as free text, e.g. "35 min" or ISO-8601 "PT35M".
             prep_time: Preparation time, same format as total_time.
-            cook_time: Cooking time, same format as total_time.
-            perform_time: Hands-on/active time, same format as total_time.
+            cook_time: Cooking time, same format as total_time. On Mealie
+                v3.31+ this is written to performTime (the API no longer
+                returns cookTime). Still accepted as a write alias.
+            perform_time: Cook time as stored by Mealie v3.31+ (the UI
+                label is "Cook Time"). Prefer this over cook_time. Same
+                format as total_time.
             recipe_yield: Yield as free text, e.g. "4 Portionen".
             servings: Number of servings (numeric).
             image_url: URL of an image to scrape and set as the recipe image.
@@ -725,10 +734,10 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                 recipe.totalTime = total_time
             if prep_time is not None:
                 recipe.prepTime = prep_time
-            if cook_time is not None:
-                recipe.cookTime = cook_time
-            if perform_time is not None:
-                recipe.performTime = perform_time
+            for field, value in recipe_time_write_fields(
+                cook_time, perform_time
+            ).items():
+                setattr(recipe, field, value)
             if recipe_yield is not None:
                 recipe.recipeYield = recipe_yield
             if servings is not None:
@@ -764,7 +773,7 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                         }
                     )
 
-            return updated
+            return normalize_recipe_times(updated)
         except Exception as e:
             error_msg = f"Error creating full recipe '{name}': {str(e)}"
             logger.error({"message": error_msg})
@@ -798,8 +807,12 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
             servings: Number of servings (numeric).
             total_time: Total time as free text, e.g. "35 min" or ISO-8601 "PT35M".
             prep_time: Preparation time, same format as total_time.
-            cook_time: Cooking time, same format as total_time.
-            perform_time: Hands-on/active time, same format as total_time.
+            cook_time: Cooking time, same format as total_time. On Mealie
+                v3.31+ this is written to performTime (the API no longer
+                returns cookTime). Still accepted as a write alias.
+            perform_time: Cook time as stored by Mealie v3.31+ (the UI
+                label is "Cook Time"). Prefer this over cook_time. Same
+                format as total_time.
             org_url: Source URL for the recipe (shown as a link in the Mealie UI).
             tags: Existing Mealie tags (id+name) to set; look up with get_tags.
             tools: Existing Mealie tools (id+name) to set; look up with get_tools.
@@ -823,10 +836,9 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
                 recipe_data["totalTime"] = total_time
             if prep_time is not None:
                 recipe_data["prepTime"] = prep_time
-            if cook_time is not None:
-                recipe_data["cookTime"] = cook_time
-            if perform_time is not None:
-                recipe_data["performTime"] = perform_time
+            recipe_data.update(
+                recipe_time_write_fields(cook_time, perform_time)
+            )
             if org_url is not None:
                 recipe_data["orgURL"] = org_url
             if tags is not None:
@@ -837,7 +849,7 @@ def register_recipe_tools(mcp: FastMCP, mealie: MealieFetcher) -> None:
             if not recipe_data:
                 raise ValueError("At least one field must be provided to update")
 
-            return mealie.patch_recipe(slug, recipe_data)
+            return normalize_recipe_times(mealie.patch_recipe(slug, recipe_data))
         except Exception as e:
             error_msg = f"Error patching recipe '{slug}': {str(e)}"
             logger.error({"message": error_msg})

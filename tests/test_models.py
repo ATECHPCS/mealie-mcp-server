@@ -7,6 +7,8 @@ from models.recipe import (
     Recipe,
     RecipeIngredientInput,
     RecipeInstructionInput,
+    normalize_recipe_times,
+    recipe_time_write_fields,
 )
 
 
@@ -84,3 +86,45 @@ def test_recipe_instruction_input_serialisation():
 def test_organizer_ref_requires_id_and_name():
     org = OrganizerRef(id="t1", name="Quick")
     assert org.model_dump(exclude_none=True) == {"id": "t1", "name": "Quick"}
+
+
+def test_normalize_recipe_times_prefers_perform_time():
+    out = normalize_recipe_times({"performTime": "20 min", "cookTime": "25 min"})
+    assert out["performTime"] == "20 min"
+    assert out["cookTime"] == "25 min"
+
+
+def test_normalize_recipe_times_fills_cook_time_from_perform_time():
+    # Mealie v3.31+ no longer returns cookTime.
+    out = normalize_recipe_times({"performTime": "20 min"})
+    assert out["performTime"] == "20 min"
+    assert out["cookTime"] == "20 min"
+
+
+def test_normalize_recipe_times_falls_back_to_cook_time():
+    # Older Mealie still returns cookTime only.
+    out = normalize_recipe_times({"cookTime": "PT25M"})
+    assert out["performTime"] == "PT25M"
+    assert out["cookTime"] == "PT25M"
+
+
+def test_recipe_time_write_fields_prefers_perform_time_for_cook_time_only():
+    assert recipe_time_write_fields(cook_time="25 min") == {
+        "cookTime": "25 min",
+        "performTime": "25 min",
+    }
+
+
+def test_recipe_time_write_fields_keeps_both_when_given():
+    assert recipe_time_write_fields(
+        cook_time="25 min", perform_time="20 min"
+    ) == {
+        "cookTime": "25 min",
+        "performTime": "20 min",
+    }
+
+
+def test_recipe_time_write_fields_perform_time_only():
+    assert recipe_time_write_fields(perform_time="20 min") == {
+        "performTime": "20 min"
+    }
